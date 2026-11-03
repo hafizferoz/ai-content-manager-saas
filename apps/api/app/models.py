@@ -166,6 +166,28 @@ class SocialAccount(Base):
     is_mock: Mapped[bool] = mapped_column(Boolean, default=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    capabilities: Mapped[list["SocialAccountCapability"]] = relationship(
+        back_populates="social_account",
+        cascade="all, delete-orphan",
+    )
+
+
+class SocialAccountCapability(Base):
+    __tablename__ = "social_account_capabilities"
+    __table_args__ = (
+        UniqueConstraint("social_account_id", "capability"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    social_account_id: Mapped[int] = mapped_column(ForeignKey("social_accounts.id", ondelete="CASCADE"), index=True)
+    capability: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(32))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    required_permissions: Mapped[list] = mapped_column(JSON, default=list)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    social_account: Mapped[SocialAccount] = relationship(back_populates="capabilities")
 
 
 class ContentItem(Base):

@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
-import hashlib
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.domain import fingerprint_brand
+from app.social_adapters import adapter_for_account
+from app.social_capabilities import has_enabled_capability
 from app.models import (
-    Approval, AuditLog, BrandProfile, ContentItem, ContentVersion, MockPublication,
+    Approval, AuditLog, BrandProfile, ContentItem, ContentVersion,
     Membership, PublishJob, SocialAccount,
 )
 
@@ -48,30 +49,9 @@ def validate_publish_authorization(db: Session, job: PublishJob) -> tuple[Approv
         raise ValueError("Approval was invalidated by a brand guidance change")
     if approval.destination.strip() == "" or account.is_mock is not True or account.platform != item.platform:
         raise ValueError("Only active mock accounts with a valid destination are supported")
+    if not has_enabled_capability(db, account, "publish"):
+        raise ValueError("This social account does not have the publish capability enabled")
     return approval, version, account
-
-
-def mock_provider_publish(db: Session, job: PublishJob, approval: Approval,
-                          version: ContentVersion, account: SocialAccount) -> str:
-    previous = db.scalar(select(MockPublication).where(
-        MockPublication.organization_id == job.organization_id,
-        MockPublication.idempotency_key == job.idempotency_key,
-    ))
-    if previous is not None:
-        return previous.provider_post_id
-    post_id = "mock_" + hashlib.sha256(
-        f"{job.organization_id}:{job.idempotency_key}".encode()
-    ).hexdigest()[:24]
-    db.add(MockPublication(
-        organization_id=job.organization_id,
-        idempotency_key=job.idempotency_key,
-        provider_post_id=post_id,
-        content_version_id=version.id,
-        social_account_id=account.id,
-        destination=approval.destination,
-    ))
-    db.flush()
-    return post_id
 
 
 def dispatch_job(job_id: int) -> str:
@@ -98,7 +78,8 @@ def dispatch_job(job_id: int) -> str:
             # Revalidate at dispatch and again immediately before the provider call.
             validate_publish_authorization(db, job)
             approval, version, account = validate_publish_authorization(db, job)
-            post_id = mock_provider_publish(db, job, approval, version, account)
+            adapter = adapter_for_account(account)
+            post_id = adapter.publish(db, job, approval, version, account)
             job.provider_post_id = post_id
             job.status = "published"
             job.completed_at = datetime.now(timezone.utc)
@@ -108,7 +89,7 @@ def dispatch_job(job_id: int) -> str:
                 action="publish.confirmed",
                 resource_type="publish_job",
                 resource_id=str(job.id),
-                details={"provider": "mock", "post_id": post_id},
+                details={"provider": adapter.name, "post_id": post_id},
             ))
             db.commit()
             return post_id

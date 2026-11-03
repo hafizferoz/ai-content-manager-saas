@@ -31,6 +31,10 @@ from app.models import (
 from app.domain import fingerprint_brand
 from app.publishing import dispatch_job
 from app.security import bearer, create_session, current_user, password_hash, require_role, workspace_member
+from app.social_capabilities import (
+    capability_catalog_response,
+    capability_rows_for_account,
+)
 
 
 app = FastAPI(title="AI Content Manager API", version="0.1.0")
@@ -73,7 +77,7 @@ class CampaignRequest(BaseModel):
 
 
 class AccountRequest(BaseModel):
-    platform: str = Field(min_length=1, max_length=32)
+    platform: str = Field(pattern="^(linkedin|instagram|facebook|youtube|x|tiktok)$")
     display_name: str = Field(min_length=1, max_length=160)
     external_account_id: str = Field(min_length=1, max_length=160)
     is_mock: bool = True
@@ -453,7 +457,26 @@ def create_campaign(workspace_id: int, payload: CampaignRequest, user: User = De
 @app.get("/api/v1/workspaces/{workspace_id}/social-accounts")
 def list_accounts(workspace_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
     workspace_member(db, user, workspace_id)
-    return [as_dict(a) for a in db.scalars(select(SocialAccount).where(SocialAccount.organization_id == workspace_id))]
+    accounts = db.scalars(select(SocialAccount).where(
+        SocialAccount.organization_id == workspace_id
+    ).order_by(SocialAccount.id)).all()
+    return [
+        {
+            **as_dict(account),
+            "capabilities": [
+                as_dict(capability)
+                for capability in sorted(account.capabilities, key=lambda row: row.capability)
+            ],
+        }
+        for account in accounts
+    ]
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/integrations/capabilities")
+def list_platform_capabilities(workspace_id: int, user: User = Depends(current_user),
+                               db: Session = Depends(get_db)) -> list[dict]:
+    workspace_member(db, user, workspace_id)
+    return capability_catalog_response()
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/social-accounts", status_code=201)
@@ -466,9 +489,17 @@ def create_account(workspace_id: int, payload: AccountRequest, user: User = Depe
     account = SocialAccount(organization_id=workspace_id, **payload.model_dump())
     db.add(account)
     db.flush()
+    capabilities = capability_rows_for_account(account)
+    db.add_all(capabilities)
     audit(db, workspace_id, user.id, "social_account.mock_created", "social_account", account.id)
     db.commit()
-    return as_dict(account)
+    return {
+        **as_dict(account),
+        "capabilities": [
+            as_dict(capability)
+            for capability in sorted(capabilities, key=lambda row: row.capability)
+        ],
+    }
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/content")

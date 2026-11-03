@@ -225,6 +225,13 @@ refresh/health, account identity, capability discovery, payload
 validation, publish, status lookup, analytics retrieval, and
 disconnect/revoke where supported.
 
+The initial implementation persists account-scoped capability status
+and dispatches through a mock adapter boundary only. It must report real
+provider capabilities as unavailable until each official integration,
+permission set, secure OAuth lifecycle, and reconciliation behavior has
+been implemented and verified. Workers re-check the enabled publish
+capability together with approval immediately before adapter dispatch.
+
 Adapters: - `LinkedInAdapter` - `InstagramAdapter` - `FacebookAdapter` -
 `YouTubeAdapter` - `XAdapter` - `TikTokAdapter` - `MockSocialAdapter`
 

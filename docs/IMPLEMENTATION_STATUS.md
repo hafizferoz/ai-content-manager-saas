@@ -1,7 +1,8 @@
 # Implementation Status
 
-**Current status:** Phase 1 foundation and Phase 2 AI workflow slice
-implemented and validated with automated tests and live Docker Compose runs.
+**Current status:** Phase 1 foundation, Phase 2 AI workflows, and the
+Phase 3 capability-registry foundation are implemented and covered by
+automated tests. Real social OAuth and platform APIs are not enabled.
 
 ## Repository assessment
 
@@ -44,7 +45,8 @@ implemented and validated with automated tests and live Docker Compose runs.
 
 ## Phase 3 --- Real social integrations
 
--   [ ] Capability registry and secure OAuth
+-   [x] Tenant-scoped capability registry and mock adapter boundary
+-   [ ] Secure OAuth state, token encryption, and refresh lifecycle
 -   [ ] Encrypted token storage and refresh
 -   [ ] LinkedIn integration verified against current requirements
 -   [ ] Instagram integration verified against current requirements

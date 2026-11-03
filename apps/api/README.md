@@ -14,6 +14,9 @@ Local authentication uses Argon2 password hashes and opaque hashed bearer sessio
 - `POST /api/v1/workspaces/{id}/content/{item_id}/ai-review` stores an advisory review. Blocking findings prevent approval submission until a new passing review is recorded.
 - `GET /api/v1/workspaces/{id}/agent-runs` and `/usage` expose tenant-scoped run history and token usage.
 - `GET /api/v1/workspaces/{id}/content/{item_id}/platform-preview` returns an approximate, text-only preview.
+- `GET /api/v1/workspaces/{id}/integrations/capabilities` lists the per-platform adapter capability baseline. `GET /api/v1/workspaces/{id}/social-accounts` returns each account's persisted capability state.
+
+The Phase 3 registry currently enables only the local mock `publish` capability. It reports real OAuth, publishing, analytics, and community features as not implemented. The worker checks the account's enabled publish capability during authorization revalidation, including immediately before dispatching to the adapter. Do not treat a registry entry as confirmation that a platform API or permission is available.
 
 The default provider is deterministic `mock`; it makes no external AI calls. An OpenAI-compatible provider can be selected using server-side `LLM_PROVIDER=openai-compatible`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_BASE_URL`. Remote provider URLs must use HTTPS. Prompts and supplied excerpts may contain customer data, so only configure a provider after reviewing its data-handling terms. The adapter validates structured output and source references; it does not store hidden reasoning or credentials.
 
