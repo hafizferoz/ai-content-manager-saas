@@ -52,7 +52,8 @@ def test_mock_account_persists_capabilities_and_rejects_real_or_unknown_accounts
     capabilities = {entry["capability"]: entry for entry in created.json()["capabilities"]}
     assert capabilities["publish"]["status"] == "available"
     assert capabilities["publish"]["enabled"] is True
-    assert capabilities["analytics"]["enabled"] is False
+    assert capabilities["analytics"]["enabled"] is True
+    assert capabilities["community"]["enabled"] is True
     assert capabilities["oauth"]["enabled"] is False
 
     listed = client.get(f"/api/v1/workspaces/{workspace_id}/social-accounts").json()

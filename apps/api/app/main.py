@@ -1,5 +1,8 @@
 import hashlib
+import csv
+import io
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -7,7 +10,7 @@ from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field, field_validator, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -26,7 +29,8 @@ from app.ai_schemas import (
 )
 from app.ai_workflows import WorkflowExecutionError, execute_workflow
 from app.models import (
-    AgentRun, Approval, AuditLog, BrandProfile, Campaign, CampaignStrategy, ContentItem, ContentVersion,
+    AgentRun, AnalyticsSnapshot, Approval, AuditLog, BrandProfile, Campaign, CampaignStrategy, CommunityMessage,
+    CommunityReply, ContentItem, ContentVersion, Experiment,
     LinkedInCredential, Membership, OAuthState, Organization, PublishJob, QualityReview,
     ResearchRecord, ResearchSource, SessionToken, SocialAccount, SocialAccountCapability,
     UsageEvent, User,
@@ -62,6 +66,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+ANALYTICS_METRICS = {
+    "impressions": {"label": "Impressions", "unit": "count", "aggregation": "sum", "definition": "Provider-reported impressions for the selected period; availability and counting vary by platform."},
+    "reach": {"label": "Reach", "unit": "count", "aggregation": "not_comparable", "definition": "Provider-reported unique accounts reached; platform definitions and deduplication windows differ."},
+    "clicks": {"label": "Clicks", "unit": "count", "aggregation": "sum", "definition": "Provider-reported clicks; click types and attribution rules are platform-specific."},
+    "reactions": {"label": "Reactions", "unit": "count", "aggregation": "sum", "definition": "Provider-reported reactions or likes; reaction types differ across platforms."},
+    "comments": {"label": "Comments", "unit": "count", "aggregation": "sum", "definition": "Provider-reported comments for the selected post and period."},
+    "shares": {"label": "Shares", "unit": "count", "aggregation": "sum", "definition": "Provider-reported shares or reposts; platform semantics differ."},
+    "engagement_rate": {"label": "Engagement rate", "unit": "percent", "aggregation": "not_comparable", "definition": "Provider-reported percentage. Formula, denominator, and attribution are platform-specific; do not compare across platforms."},
+    "followers_gained": {"label": "Followers gained", "unit": "count", "aggregation": "not_comparable", "definition": "Provider-reported follower change; attribution to an individual post may not be available."},
+}
 
 
 class RegisterRequest(BaseModel):
@@ -199,6 +214,118 @@ class PublishReconciliationRequest(BaseModel):
         if self.outcome == "confirmed_published" and self.retry_confirmation is not None:
             raise ValueError("Retry confirmation is not valid for a published outcome")
         return self
+
+
+class AnalyticsSnapshotRequest(BaseModel):
+    social_account_id: int
+    content_item_id: int | None = None
+    campaign_id: int | None = None
+    period_start: datetime
+    period_end: datetime
+    metrics: dict[str, int | float] = Field(default_factory=dict)
+    unavailable_metrics: list[str] = Field(default_factory=list)
+    source: Literal["manual_import", "mock"]
+    source_reference: str = Field(min_length=8, max_length=160)
+    source_note: str = Field(min_length=8, max_length=500)
+
+    @field_validator("metrics", mode="before")
+    @classmethod
+    def validate_metric_values(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            raise ValueError("Metrics must be an object")
+        for key, value in values.items():
+            if key not in ANALYTICS_METRICS:
+                raise ValueError(f"Unsupported analytics metric: {key}")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"Metric {key} must be a number")
+            if value < 0 or value > 1_000_000_000_000_000:
+                raise ValueError(f"Metric {key} must be between zero and 1 quadrillion")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"Metric {key} must be finite")
+        return values
+
+    @field_validator("unavailable_metrics")
+    @classmethod
+    def validate_unavailable_metrics(cls, values: list[str]) -> list[str]:
+        if len(set(values)) != len(values) or any(value not in ANALYTICS_METRICS for value in values):
+            raise ValueError("Unavailable metrics must be unique supported metric names")
+        return values
+
+    @field_validator("period_start", "period_end")
+    @classmethod
+    def require_aware_dates(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Timestamps must include a timezone")
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def validate_period(self):
+        if self.period_start >= self.period_end:
+            raise ValueError("period_start must be before period_end")
+        if set(self.metrics).intersection(self.unavailable_metrics):
+            raise ValueError("A metric cannot be both supplied and unavailable")
+        return self
+
+
+class ExperimentRequest(BaseModel):
+    campaign_id: int | None = None
+    platform: str | None = Field(default=None, pattern="^(linkedin|instagram|facebook|youtube|x|tiktok)$")
+    name: str = Field(min_length=1, max_length=200)
+    hypothesis: str = Field(min_length=3, max_length=2000)
+    variant: str = Field(min_length=1, max_length=2000)
+    primary_metric: str = Field(pattern="^(impressions|reach|clicks|reactions|comments|shares|engagement_rate|followers_gained)$")
+    period_start: datetime
+    period_end: datetime
+    status: Literal["planned", "running", "completed", "paused"] = "planned"
+    outcome: str = Field(default="", max_length=2000)
+    next_action: str = Field(default="", max_length=2000)
+
+    @field_validator("period_start", "period_end")
+    @classmethod
+    def require_aware_dates(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Timestamps must include a timezone")
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def validate_period(self):
+        if self.period_start >= self.period_end:
+            raise ValueError("period_start must be before period_end")
+        return self
+
+
+class CommunityMessageRequest(BaseModel):
+    social_account_id: int
+    external_message_id: str = Field(min_length=1, max_length=160)
+    conversation_id: str = Field(min_length=1, max_length=160)
+    author_name: str = Field(min_length=1, max_length=160)
+    body: str = Field(min_length=1, max_length=5000)
+    source: Literal["manual_import", "mock"]
+    received_at: datetime
+
+    @field_validator("received_at")
+    @classmethod
+    def require_aware_received_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("received_at must include a timezone")
+        return value.astimezone(timezone.utc)
+
+
+class CommunityAssignmentRequest(BaseModel):
+    assigned_to: int | None
+
+
+class CommunityStatusRequest(BaseModel):
+    status: Literal["open", "resolved"]
+
+
+class CommunityReplyRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=5000)
+
+
+class CommunityReplyDecisionRequest(BaseModel):
+    decision: Literal["approved", "rejected", "changes_requested"]
+    comment: str = Field(default="", max_length=2000)
 
 
 def as_dict(model: Any, omit: tuple[str, ...] = ()) -> dict:
@@ -975,6 +1102,7 @@ def list_approvals(workspace_id: int, status: str | None = None, user: User = De
             "version_number": version.number if version else None,
             "platform": item.platform if item else "",
             "account_name": account.display_name if account else "",
+            "account_is_mock": account.is_mock if account else True,
             "source_references": [as_dict(source) for source in source_rows],
             "quality_findings": [
                 {"review_type": review.review_type, **finding}
@@ -1079,6 +1207,7 @@ def list_publish_jobs(workspace_id: int, user: User = Depends(current_user),
             "content_title": item.title if item else "",
             "platform": item.platform if item else "",
             "account_name": account.display_name if account else "",
+            "account_is_mock": account.is_mock if account else True,
         })
     return result
 
@@ -1192,6 +1321,502 @@ def reconcile_publish_job(
     )
     db.commit()
     return as_dict(job)
+
+
+def analytics_snapshot_query(
+    db: Session,
+    workspace_id: int,
+    start: datetime | None,
+    end: datetime | None,
+    platform: str | None,
+    social_account_id: int | None,
+    campaign_id: int | None,
+    content_item_id: int | None,
+):
+    statement = select(
+        AnalyticsSnapshot,
+        SocialAccount.display_name,
+        ContentItem.title,
+        Campaign.name,
+    ).join(
+        SocialAccount,
+        (SocialAccount.id == AnalyticsSnapshot.social_account_id)
+        & (SocialAccount.organization_id == workspace_id),
+    ).outerjoin(
+        ContentItem,
+        (ContentItem.id == AnalyticsSnapshot.content_item_id)
+        & (ContentItem.organization_id == workspace_id),
+    ).outerjoin(
+        Campaign,
+        (Campaign.id == AnalyticsSnapshot.campaign_id)
+        & (Campaign.organization_id == workspace_id),
+    ).where(AnalyticsSnapshot.organization_id == workspace_id)
+    if start is not None:
+        statement = statement.where(AnalyticsSnapshot.period_end >= start)
+    if end is not None:
+        statement = statement.where(AnalyticsSnapshot.period_start <= end)
+    if platform is not None:
+        statement = statement.where(AnalyticsSnapshot.platform == platform)
+    if social_account_id is not None:
+        statement = statement.where(AnalyticsSnapshot.social_account_id == social_account_id)
+    if campaign_id is not None:
+        statement = statement.where(AnalyticsSnapshot.campaign_id == campaign_id)
+    if content_item_id is not None:
+        statement = statement.where(AnalyticsSnapshot.content_item_id == content_item_id)
+    return db.execute(statement.order_by(AnalyticsSnapshot.period_end.desc(), AnalyticsSnapshot.id.desc()).limit(500)).all()
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/analytics/definitions")
+def analytics_definitions(workspace_id: int, user: User = Depends(current_user),
+                          db: Session = Depends(get_db)) -> dict:
+    workspace_member(db, user, workspace_id)
+    return {
+        "definitions": [{"key": key, **definition} for key, definition in ANALYTICS_METRICS.items()],
+        "freshness_note": "Snapshots show when data was captured. Manual imports are not live provider syncs.",
+    }
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/analytics")
+def list_analytics(
+    workspace_id: int,
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    platform: str | None = Query(default=None, pattern="^(linkedin|instagram|facebook|youtube|x|tiktok)$"),
+    social_account_id: int | None = Query(default=None, gt=0),
+    campaign_id: int | None = Query(default=None, gt=0),
+    content_item_id: int | None = Query(default=None, gt=0),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    workspace_member(db, user, workspace_id)
+    if start and start.tzinfo is None or end and end.tzinfo is None:
+        raise HTTPException(status_code=422, detail="Analytics date filters must include a timezone")
+    if start and end and start > end:
+        raise HTTPException(status_code=422, detail="start must be before end")
+    rows = analytics_snapshot_query(
+        db, workspace_id, start, end, platform, social_account_id, campaign_id, content_item_id
+    )
+    snapshots = []
+    for snapshot, account_name, content_title, campaign_name in rows:
+        snapshots.append({
+            **as_dict(snapshot),
+            "account_name": account_name,
+            "content_title": content_title or "",
+            "campaign_name": campaign_name or "",
+        })
+    latest = max((snapshot["fetched_at"] for snapshot in snapshots), default=None)
+    return {
+        "snapshots": snapshots,
+        "definitions": [{"key": key, **definition} for key, definition in ANALYTICS_METRICS.items()],
+        "freshness": {
+            "latest_snapshot_at": latest,
+            "snapshot_count": len(snapshots),
+            "note": "Manual imports are not live provider syncs. Metric definitions and platform availability can differ.",
+        },
+    }
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/analytics/snapshots", status_code=201)
+def create_analytics_snapshot(
+    workspace_id: int,
+    payload: AnalyticsSnapshotRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "analyst")
+    account = db.scalar(select(SocialAccount).where(
+        SocialAccount.id == payload.social_account_id,
+        SocialAccount.organization_id == workspace_id,
+        SocialAccount.active.is_(True),
+    ))
+    if account is None:
+        raise HTTPException(status_code=404, detail="Active social account not found")
+    if payload.source == "mock" and not account.is_mock:
+        raise HTTPException(status_code=409, detail="Mock analytics data can only be attached to a mock account")
+    item = None
+    if payload.content_item_id is not None:
+        item = db.scalar(select(ContentItem).where(
+            ContentItem.id == payload.content_item_id,
+            ContentItem.organization_id == workspace_id,
+        ))
+        if item is None:
+            raise HTTPException(status_code=404, detail="Content item not found")
+        if item.platform != account.platform:
+            raise HTTPException(status_code=409, detail="Analytics account platform does not match the content platform")
+    campaign_id = payload.campaign_id
+    if campaign_id is not None:
+        campaign = db.scalar(select(Campaign).where(
+            Campaign.id == campaign_id,
+            Campaign.organization_id == workspace_id,
+        ))
+        if campaign is None:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        if item is not None and item.campaign_id not in (None, campaign_id):
+            raise HTTPException(status_code=409, detail="Campaign does not match the selected content item")
+    elif item is not None:
+        campaign_id = item.campaign_id
+    duplicate = db.scalar(select(AnalyticsSnapshot.id).where(
+        AnalyticsSnapshot.organization_id == workspace_id,
+        AnalyticsSnapshot.social_account_id == account.id,
+        AnalyticsSnapshot.source_reference == payload.source_reference,
+    ))
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="This analytics source reference was already imported")
+    snapshot = AnalyticsSnapshot(
+        organization_id=workspace_id,
+        social_account_id=account.id,
+        content_item_id=item.id if item else None,
+        campaign_id=campaign_id,
+        platform=account.platform,
+        period_start=payload.period_start,
+        period_end=payload.period_end,
+        metrics=payload.metrics,
+        unavailable_metrics=payload.unavailable_metrics,
+        source=payload.source,
+        source_reference=payload.source_reference,
+        source_note=payload.source_note,
+        fetched_at=datetime.now(timezone.utc),
+        created_by=user.id,
+    )
+    db.add(snapshot)
+    try:
+        db.flush()
+        audit(db, workspace_id, user.id, "analytics.snapshot_imported", "analytics_snapshot", snapshot.id, {
+            "social_account_id": account.id,
+            "platform": account.platform,
+            "source": payload.source,
+            "period_start": payload.period_start.isoformat(),
+            "period_end": payload.period_end.isoformat(),
+        })
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This analytics source reference was already imported")
+    return as_dict(snapshot)
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/analytics/export.csv")
+def export_analytics_csv(
+    workspace_id: int,
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    platform: str | None = Query(default=None, pattern="^(linkedin|instagram|facebook|youtube|x|tiktok)$"),
+    social_account_id: int | None = Query(default=None, gt=0),
+    campaign_id: int | None = Query(default=None, gt=0),
+    content_item_id: int | None = Query(default=None, gt=0),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    workspace_member(db, user, workspace_id)
+    if start and start.tzinfo is None or end and end.tzinfo is None:
+        raise HTTPException(status_code=422, detail="Analytics date filters must include a timezone")
+    if start and end and start > end:
+        raise HTTPException(status_code=422, detail="start must be before end")
+    rows = analytics_snapshot_query(
+        db, workspace_id, start, end, platform, social_account_id, campaign_id, content_item_id
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    metric_names = list(ANALYTICS_METRICS)
+    writer.writerow([
+        "snapshot_id", "platform", "account", "content", "campaign", "period_start",
+        "period_end", "fetched_at", "source", "source_note", *metric_names,
+        "unavailable_metrics",
+    ])
+    for snapshot, account_name, content_title, campaign_name in rows:
+        safe = lambda value: "'" + value if isinstance(value, str) and value.startswith(("=", "+", "-", "@")) else value
+        writer.writerow([
+            snapshot.id, snapshot.platform, safe(account_name), safe(content_title or ""),
+            safe(campaign_name or ""), snapshot.period_start.isoformat(),
+            snapshot.period_end.isoformat(), snapshot.fetched_at.isoformat(),
+            snapshot.source, safe(snapshot.source_note),
+            *(snapshot.metrics.get(name, "") for name in metric_names),
+            ",".join(snapshot.unavailable_metrics),
+        ])
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=analytics.csv"},
+    )
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/experiments")
+def list_experiments(workspace_id: int, user: User = Depends(current_user),
+                     db: Session = Depends(get_db)) -> list[dict]:
+    workspace_member(db, user, workspace_id)
+    return [as_dict(row) for row in db.scalars(
+        select(Experiment).where(Experiment.organization_id == workspace_id)
+        .order_by(Experiment.created_at.desc(), Experiment.id.desc()).limit(200)
+    ).all()]
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/experiments", status_code=201)
+def create_experiment(workspace_id: int, payload: ExperimentRequest,
+                      user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "strategist", "analyst")
+    if payload.campaign_id is not None and db.scalar(select(Campaign.id).where(
+        Campaign.id == payload.campaign_id,
+        Campaign.organization_id == workspace_id,
+    )) is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    experiment = Experiment(
+        organization_id=workspace_id,
+        created_by=user.id,
+        **payload.model_dump(),
+    )
+    db.add(experiment)
+    db.flush()
+    audit(db, workspace_id, user.id, "experiment.created", "experiment", experiment.id, {
+        "primary_metric": experiment.primary_metric,
+        "status": experiment.status,
+    })
+    db.commit()
+    return as_dict(experiment)
+
+
+@app.put("/api/v1/workspaces/{workspace_id}/experiments/{experiment_id}")
+def update_experiment(workspace_id: int, experiment_id: int, payload: ExperimentRequest,
+                      user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "strategist", "analyst")
+    experiment = db.scalar(select(Experiment).where(
+        Experiment.id == experiment_id,
+        Experiment.organization_id == workspace_id,
+    ).with_for_update())
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    if payload.campaign_id is not None and db.scalar(select(Campaign.id).where(
+        Campaign.id == payload.campaign_id,
+        Campaign.organization_id == workspace_id,
+    )) is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    for key, value in payload.model_dump().items():
+        setattr(experiment, key, value)
+    audit(db, workspace_id, user.id, "experiment.updated", "experiment", experiment.id, {
+        "primary_metric": experiment.primary_metric,
+        "status": experiment.status,
+    })
+    db.commit()
+    return as_dict(experiment)
+
+
+def community_message_response(db: Session, message: CommunityMessage) -> dict:
+    account = db.get(SocialAccount, message.social_account_id)
+    replies = db.scalars(select(CommunityReply).where(
+        CommunityReply.organization_id == message.organization_id,
+        CommunityReply.community_message_id == message.id,
+    ).order_by(CommunityReply.created_at, CommunityReply.id)).all()
+    return {
+        **as_dict(message),
+        "platform": account.platform if account else "",
+        "account_name": account.display_name if account else "",
+        "replies": [as_dict(reply) for reply in replies],
+        "external_send_available": False,
+    }
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/community")
+def list_community_messages(
+    workspace_id: int,
+    status: Literal["open", "resolved"] | None = Query(default=None),
+    assigned_to: int | None = Query(default=None, gt=0),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    workspace_member(db, user, workspace_id)
+    statement = select(CommunityMessage).where(
+        CommunityMessage.organization_id == workspace_id,
+    )
+    if status:
+        statement = statement.where(CommunityMessage.status == status)
+    if assigned_to:
+        statement = statement.where(CommunityMessage.assigned_to == assigned_to)
+    messages = db.scalars(statement.order_by(
+        CommunityMessage.received_at.desc(), CommunityMessage.id.desc()
+    ).limit(200)).all()
+    return [community_message_response(db, message) for message in messages]
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/community", status_code=201)
+def create_community_message(workspace_id: int, payload: CommunityMessageRequest,
+                             user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "creator", "strategist")
+    account = db.scalar(select(SocialAccount).where(
+        SocialAccount.id == payload.social_account_id,
+        SocialAccount.organization_id == workspace_id,
+        SocialAccount.active.is_(True),
+    ))
+    if account is None:
+        raise HTTPException(status_code=404, detail="Active social account not found")
+    if payload.source == "mock" and not account.is_mock:
+        raise HTTPException(status_code=409, detail="Mock interactions can only be attached to a mock account")
+    message = CommunityMessage(
+        organization_id=workspace_id,
+        social_account_id=account.id,
+        external_message_id=payload.external_message_id,
+        conversation_id=payload.conversation_id,
+        author_name=payload.author_name,
+        body=payload.body,
+        source=payload.source,
+        received_at=payload.received_at,
+        created_by=user.id,
+    )
+    db.add(message)
+    try:
+        db.flush()
+        audit(db, workspace_id, user.id, "community.message_imported", "community_message", message.id, {
+            "social_account_id": account.id,
+            "source": payload.source,
+        })
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This message was already imported")
+    return community_message_response(db, message)
+
+
+@app.patch("/api/v1/workspaces/{workspace_id}/community/{message_id}/assignment")
+def assign_community_message(
+    workspace_id: int,
+    message_id: int,
+    payload: CommunityAssignmentRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "approver", "creator", "strategist")
+    message = db.scalar(select(CommunityMessage).where(
+        CommunityMessage.id == message_id,
+        CommunityMessage.organization_id == workspace_id,
+    ).with_for_update())
+    if message is None:
+        raise HTTPException(status_code=404, detail="Community message not found")
+    if payload.assigned_to is not None and db.scalar(select(Membership.id).where(
+        Membership.organization_id == workspace_id,
+        Membership.user_id == payload.assigned_to,
+        Membership.active.is_(True),
+    )) is None:
+        raise HTTPException(status_code=404, detail="Active workspace assignee not found")
+    message.assigned_to = payload.assigned_to
+    audit(db, workspace_id, user.id, "community.message_assigned", "community_message", message.id, {
+        "assigned_to": payload.assigned_to,
+    })
+    db.commit()
+    return community_message_response(db, message)
+
+
+@app.patch("/api/v1/workspaces/{workspace_id}/community/{message_id}/status")
+def update_community_status(
+    workspace_id: int,
+    message_id: int,
+    payload: CommunityStatusRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "approver", "creator", "strategist")
+    message = db.scalar(select(CommunityMessage).where(
+        CommunityMessage.id == message_id,
+        CommunityMessage.organization_id == workspace_id,
+    ).with_for_update())
+    if message is None:
+        raise HTTPException(status_code=404, detail="Community message not found")
+    previous_status = message.status
+    message.status = payload.status
+    audit(db, workspace_id, user.id, "community.message_status_changed", "community_message", message.id, {
+        "from": previous_status,
+        "to": payload.status,
+    })
+    db.commit()
+    return community_message_response(db, message)
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/community/{message_id}/replies", status_code=201)
+def create_community_reply(
+    workspace_id: int,
+    message_id: int,
+    payload: CommunityReplyRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "creator", "strategist")
+    message = db.scalar(select(CommunityMessage).where(
+        CommunityMessage.id == message_id,
+        CommunityMessage.organization_id == workspace_id,
+    ))
+    if message is None:
+        raise HTTPException(status_code=404, detail="Community message not found")
+    if message.status != "open":
+        raise HTTPException(status_code=409, detail="Reopen the community message before drafting a reply")
+    reply = CommunityReply(
+        organization_id=workspace_id,
+        community_message_id=message.id,
+        body=payload.body,
+        status="draft",
+        created_by=user.id,
+    )
+    db.add(reply)
+    db.flush()
+    audit(db, workspace_id, user.id, "community.reply_drafted", "community_reply", reply.id, {
+        "community_message_id": message.id,
+    })
+    db.commit()
+    return as_dict(reply)
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/community/replies/{reply_id}/submit")
+def submit_community_reply(workspace_id: int, reply_id: int, user: User = Depends(current_user),
+                           db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "creator", "strategist")
+    reply = db.scalar(select(CommunityReply).where(
+        CommunityReply.id == reply_id,
+        CommunityReply.organization_id == workspace_id,
+    ).with_for_update())
+    if reply is None:
+        raise HTTPException(status_code=404, detail="Community reply not found")
+    if reply.created_by != user.id:
+        raise HTTPException(status_code=403, detail="Only the reply author can submit this draft for review")
+    if reply.status not in ("draft", "changes_requested"):
+        raise HTTPException(status_code=409, detail="Only a draft or changes-requested reply can be submitted")
+    reply.status = "pending_review"
+    audit(db, workspace_id, user.id, "community.reply_submitted", "community_reply", reply.id)
+    db.commit()
+    return as_dict(reply)
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/community/replies/{reply_id}/decision")
+def decide_community_reply(
+    workspace_id: int,
+    reply_id: int,
+    payload: CommunityReplyDecisionRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "approver")
+    reply = db.scalar(select(CommunityReply).where(
+        CommunityReply.id == reply_id,
+        CommunityReply.organization_id == workspace_id,
+    ).with_for_update())
+    if reply is None:
+        raise HTTPException(status_code=404, detail="Community reply not found")
+    if reply.created_by == user.id:
+        raise HTTPException(status_code=403, detail="Authors cannot review their own community replies")
+    if reply.status != "pending_review":
+        raise HTTPException(status_code=409, detail="Only pending community replies can be reviewed")
+    reply.status = payload.decision
+    reply.reviewed_by = user.id
+    reply.review_comment = payload.comment
+    audit(db, workspace_id, user.id, f"community.reply_{payload.decision}", "community_reply", reply.id, {
+        "external_send_available": False,
+    })
+    db.commit()
+    return as_dict(reply)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/audit-logs")

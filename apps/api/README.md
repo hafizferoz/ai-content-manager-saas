@@ -16,6 +16,9 @@ Local authentication uses Argon2 password hashes and opaque hashed bearer sessio
 - `GET /api/v1/workspaces/{id}/content/{item_id}/platform-preview` returns an approximate, text-only preview.
 - `GET /api/v1/workspaces/{id}/integrations/capabilities` lists the per-platform adapter capability baseline. `GET /api/v1/workspaces/{id}/social-accounts` returns each account's persisted capability state.
 - `POST /api/v1/workspaces/{id}/integrations/linkedin/connect` starts a workspace-admin OAuth flow; LinkedIn redirects to `/api/v1/integrations/linkedin/callback`. `DELETE /api/v1/workspaces/{id}/social-accounts/{account_id}/connection` deletes locally stored credentials and disables that account.
+- `POST /api/v1/workspaces/{id}/analytics/snapshots`, `GET /analytics`, `GET /analytics/definitions`, and `GET /analytics/export.csv` store and report explicitly labelled mock/manual metric snapshots. Filters support date, platform, account, campaign, and content. No platform analytics API is called.
+- `GET/POST /api/v1/workspaces/{id}/experiments` and `PUT /experiments/{experiment_id}` store tenant-scoped hypothesis/variant/period/metric/outcome logs.
+- `GET/POST /api/v1/workspaces/{id}/community` supports mock/manual message records; assignment and resolution are workspace-scoped. Reply drafts can be submitted and reviewed at `/community/{message_id}/replies` and `/community/replies/{reply_id}/decision`; approved drafts are never dispatched externally.
 
 The Phase 3 registry enables mock publishing for local accounts. LinkedIn can be connected through server-side authorization-code OAuth when configured. Only text-only member posts are implemented; the LinkedIn publish capability is enabled only when the token grants `w_member_social`, and the usual immutable-version human approval gate still applies. Organization posts, media, LinkedIn analytics, community features, and all other real-platform adapters remain unavailable.
 
