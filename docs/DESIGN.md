@@ -86,6 +86,9 @@ account as a real connection.
 -   Separate facts, hypotheses, and recommendations.
 -   Save findings to a campaign brief; show stale/inaccessible sources
     and limits.
+-   In local mock mode, show that only user-provided excerpts are
+    analyzed and URLs are not fetched. Treat source excerpts as
+    untrusted data, not workflow instructions.
 
 ### Campaigns
 
@@ -166,6 +169,12 @@ Show agent/version, queued/running/succeeded/failed, duration,
 triggering actor, referenced inputs, safe output summary, sources,
 retry/cancel where safe, and usage/cost when available. Do not expose
 hidden chain-of-thought.
+
+Phase 2 exposes the Market Intelligence, Content Strategist,
+Cross-Platform Copywriter, Creative Director, and Quality/Brand Safety
+workflows. Generated copy remains an editable draft. Platform previews
+are labelled approximate and text-only; never imply API capability or
+exact rendering from a preview.
 
 ### Settings and Administration
 

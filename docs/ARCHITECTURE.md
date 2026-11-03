@@ -119,6 +119,19 @@ media; quality reviews; approvals; social accounts and capabilities;
 publish jobs; published posts; analytics snapshots; agent runs; usage;
 subscriptions; audit logs; webhooks and outbox events.
 
+AI workflows use a provider-neutral structured-output boundary. The local
+provider is deterministic and credential-free; an optional server-side
+OpenAI-compatible adapter is configured explicitly. Validate all outputs
+against typed schemas, scope citations to source records in the active
+organization, and record run status, provider/model, duration, and usage
+without storing credentials or hidden reasoning. User-provided source
+excerpts are untrusted data; do not fetch arbitrary source URLs as part
+of this workflow. A versioned synthetic evaluation corpus exercises all
+Phase 2 output schemas, citation scoping, and selected brand-safety
+expectations. Mock evaluation is the safe default; live provider
+evaluation requires explicit operator opt-in and must not use customer
+data. Evaluation does not approve or publish content.
+
 ### Workers
 
 Research retrieval from permitted sources, generation, media processing,
@@ -225,7 +238,7 @@ missing-permission explanations in the UI.
 
 Core tables/entities: - `users`, `organizations`,
 `organization_memberships` - `brand_profiles`, `brand_documents`,
-`audience_personas` - `research_sources`, `research_items`,
+`audience_personas` - `research_records`, `research_sources`,
 `campaigns` - `content_items`, `content_versions`, `media_assets` -
 `quality_reviews`, `approval_records` - `social_accounts`,
 `social_account_capabilities` - `publish_jobs`, `published_posts` -

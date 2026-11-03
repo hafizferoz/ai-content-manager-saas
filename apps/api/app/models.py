@@ -78,6 +78,70 @@ class Campaign(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ResearchRecord(Base):
+    __tablename__ = "research_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id"), nullable=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    question: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), default="queued")
+    agent_run_id: Mapped[int | None] = mapped_column(nullable=True)
+    findings: Mapped[list] = mapped_column(JSON, default=list)
+    recommendations: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ResearchSource(Base):
+    __tablename__ = "research_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    research_record_id: Mapped[int] = mapped_column(ForeignKey("research_records.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    url: Mapped[str] = mapped_column(String(2000))
+    source_type: Mapped[str] = mapped_column(String(40), default="web")
+    excerpt: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    agent_name: Mapped[str] = mapped_column(String(80))
+    workflow_version: Mapped[str] = mapped_column(String(40), default="1")
+    provider: Mapped[str] = mapped_column(String(40))
+    model: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(24), default="running")
+    input_refs: Mapped[dict] = mapped_column(JSON, default=dict)
+    output: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    content_version_id: Mapped[int | None] = mapped_column(ForeignKey("content_versions.id"), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UsageEvent(Base):
+    __tablename__ = "usage_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    agent_run_id: Mapped[int] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), unique=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    model: Mapped[str] = mapped_column(String(120))
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    is_estimated: Mapped[bool] = mapped_column(Boolean, default=False)
+    cost_usd: Mapped[float | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class SocialAccount(Base):
     __tablename__ = "social_accounts"
 
@@ -99,6 +163,7 @@ class ContentItem(Base):
     campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(240))
     platform: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), default="draft")
     current_version_id: Mapped[int | None] = mapped_column(
         ForeignKey("content_versions.id", use_alter=True, name="fk_content_items_current_version"),
         nullable=True,
@@ -116,6 +181,7 @@ class ContentVersion(Base):
     number: Mapped[int] = mapped_column(Integer)
     body: Mapped[str] = mapped_column(Text)
     media_manifest: Mapped[list] = mapped_column(JSON, default=list)
+    source_references: Mapped[list] = mapped_column(JSON, default=list)
     fingerprint: Mapped[str] = mapped_column(String(64), index=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -128,6 +194,8 @@ class QualityReview(Base):
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
     content_version_id: Mapped[int] = mapped_column(ForeignKey("content_versions.id", ondelete="CASCADE"))
     brand_fingerprint: Mapped[str] = mapped_column(String(64))
+    review_type: Mapped[str] = mapped_column(String(24), default="deterministic")
+    agent_run_id: Mapped[int | None] = mapped_column(nullable=True)
     passed: Mapped[bool] = mapped_column(Boolean)
     findings: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

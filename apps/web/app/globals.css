@@ -69,6 +69,13 @@ input:focus, textarea:focus, select:focus, button:focus-visible { outline: 3px s
 .empty p { margin: 4px 0; }
 .empty-icon { color: #98a2b3; font-size: 26px; }
 .callout, .notice { background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; color: #3730a3; margin-top: 15px; padding: 12px 15px; }
+.ai-studio { display: grid; gap: 14px; }
+.ai-studio .callout { margin-top: 0; }
+.output-json { max-height: 480px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-panel { margin-top: 16px; }
+.preview-panel p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-panel small { color: var(--muted); }
+.preview-panel li { color: #475467; margin: 4px 0; }
 .notice { align-items: center; display: flex; justify-content: space-between; margin: 0 0 16px; }
 .auth-page { align-items: center; background: radial-gradient(ellipse at top left, #e0e7ff, transparent 55%), var(--bg); display: flex; justify-content: center; min-height: 100vh; padding: 24px; }
 .auth-card { background: white; border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 16px 50px #10182812; max-width: 480px; padding: 38px; width: 100%; }

@@ -1,7 +1,7 @@
 # Implementation Status
 
-**Current status:** Phase 1 vertical slice implemented and validated with
-automated tests and a live Docker Compose end-to-end run.
+**Current status:** Phase 1 foundation and Phase 2 AI workflow slice
+implemented and validated with automated tests and live Docker Compose runs.
 
 ## Repository assessment
 
@@ -28,14 +28,18 @@ automated tests and a live Docker Compose end-to-end run.
 
 ## Phase 2 --- AI workflow
 
--   [ ] Provider-neutral LLM adapter and structured outputs
--   [ ] Source-linked research
--   [ ] Market Intelligence agent
--   [ ] Content Strategist agent
--   [ ] Cross-Platform Copywriter agent
--   [ ] Creative Director agent
--   [ ] Quality/Brand Safety Reviewer agent
--   [ ] Agent run history, usage metering, platform previews
+-   [x] Provider-neutral LLM adapter and validated structured outputs
+-   [x] Source-linked research using user-supplied source excerpts (no URL fetching)
+-   [x] Market Intelligence agent
+-   [x] Content Strategist agent
+-   [x] Cross-Platform Copywriter agent
+-   [x] Creative Director agent
+-   [x] Quality/Brand Safety Reviewer agent
+-   [x] Tenant-scoped agent run history, estimated token usage, platform previews
+-   [x] AI workflow tests for output validation, source scoping, errors, and usage
+-   [x] Mock/provider adapter contract tests (HTTP mocked; no external credentials used)
+-   [x] Versioned five-workflow evaluation corpus and safe-by-default regression runner
+-   [ ] Run and review live-provider quality baselines for each supported deployment model
 
 ## Phase 3 --- Real social integrations
 
@@ -68,9 +72,13 @@ automated tests and a live Docker Compose end-to-end run.
 
 ## Known limitations
 
--   Phase 1 local workflow is mock-only; real social APIs are intentionally unavailable.
+-   Social publishing is mock-only; real social APIs are intentionally unavailable.
+-   AI uses a deterministic mock by default. A versioned synthetic corpus checks structured outputs, source scoping, and selected brand-safety expectations; provider-specific live quality baselines, budgets, and deployment secrets management are not production-ready.
+-   Research stores user-supplied source URLs and excerpts; URL fetching/crawling and independent source verification are intentionally not implemented.
+-   Mock token counts are estimates and provider costs may be unknown; usage reporting currently retains up to 1,000 most recent events per workspace.
+-   Platform previews are text-only approximations and do not guarantee platform capability or exact rendering.
 -   Authentication has no email verification, password reset, refresh-token rotation, or identity-provider integration.
--   Quality review is deterministic and basic; it is not an AI reviewer, legal review, factual verification, or plagiarism check.
+-   AI review and strategy outputs are advisory; they do not establish factual accuracy, legal compliance, content rights, or platform approval.
 -   Media manifest metadata is versioned, but uploads/private storage and media processing are not implemented.
 -   Campaign editing/deletion, content library media upload, calendar scheduling, notifications, analytics, and operator reconciliation tools remain incomplete.
 -   Publish jobs in `dispatching` or `reconciliation_required` need an operator workflow; no blind automatic retries are performed.
