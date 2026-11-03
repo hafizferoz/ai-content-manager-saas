@@ -286,6 +286,52 @@ server checks remain authoritative.
 -   Explain disabled actions, such as missing account permission.
 -   Show progress and safe cancellation for long-running work.
 
+### Dialogs, notifications, and errors
+
+-   Use branded in-app dialogs and notifications; do not use browser
+    `alert`, `confirm`, or `prompt` dialogs or browser-native validation
+    popups. Intercept form validation and present accessible in-app
+    feedback instead.
+-   Use a dialog only when a decision is required or information must be
+    collected. Keep ordinary progress and success feedback in a
+    non-blocking notification, and place field validation beside the
+    relevant field.
+-   Give every dialog a concise, task-oriented title; explain the
+    consequence in plain language; identify the affected account,
+    destination, content version, or record when relevant; and label
+    buttons with the action they perform. Use "Cancel" for the safe exit.
+-   Destructive actions, live publishing, retries, and other
+    consequential changes require explicit confirmation. Do not
+    preselect a risky option, make the dangerous action the default,
+    or treat closing/dismissing the dialog as consent.
+-   Input dialogs preserve the user's entered values when validation or
+    a request fails. State length/format requirements before submission
+    and show validation errors in the dialog next to the input.
+-   Form validation identifies the affected field and the correction
+    needed. Prevent browser-native validation bubbles; keep the entered
+    values intact and provide a visible, screen-reader-announced
+    submission summary when inline field feedback is unavailable.
+-   Error messages state what failed and the next safe step when known.
+    Preserve the user's work; never expose tokens, passwords, raw
+    provider payloads, or sensitive stack traces. Do not present an
+    error as a successful result.
+-   Notifications are concise, non-blocking, dismissible, and visually
+    distinct for success, information, and error. Use polite live
+    announcements for routine feedback and assertive announcements for
+    actionable errors. Do not rely on color or icon alone.
+-   Dialogs have an accessible name and description, move keyboard
+    focus into the dialog, keep focus within it while open, close on
+    Escape unless a submission is in progress, and return focus to the
+    triggering control after close. All actions must work by keyboard
+    and have visible focus.
+-   Keep dialogs usable on narrow screens and at browser zoom: constrain
+    height to the viewport, allow the body to scroll, keep actions
+    reachable, and avoid layouts that obscure the message or safe exit.
+-   Display no more than one modal dialog at a time. Do not stack
+    confirmation dialogs to gather a single workflow's inputs; present
+    a deliberate sequence only when each answer depends on the prior
+    result.
+
 ## 9. Accessibility, localization, notifications
 
 Target WCAG 2.2 AA: keyboard operation, visible focus, semantic
@@ -306,6 +352,8 @@ replace authorization.
 -   Failed publish explains whether retry is safe.
 -   Mock and real accounts are clearly distinguished.
 -   Major workflows include empty/loading/error/denied states.
+-   Browser-native dialogs are not used; confirmation, input, and error
+    feedback follow the dialog and notification principles above.
 -   Keyboard-only user can complete onboarding, editing, approval, and
     navigation.
 -   Analytics show the period, metric definitions, and freshness.

@@ -260,6 +260,36 @@ def test_provider_configuration_failure_is_recorded_and_reported(client, monkeyp
     assert research[0]["status"] == "failed"
 
 
+def test_copywriter_provider_rejection_reports_safe_actionable_error(client, monkeypatch):
+    import httpx
+
+    _, workspace_id = register_workspace(client)
+    monkeypatch.setenv("LLM_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("LLM_API_KEY", "synthetic-test-key")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    def rejected_request(url, headers, json, timeout):
+        return httpx.Response(
+            401,
+            text="provider response containing sensitive details",
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.ai_provider.httpx.post", rejected_request)
+    response = client.post(f"/api/v1/workspaces/{workspace_id}/content/generate", json={
+        "platform": "linkedin",
+        "brief": "Draft a practical educational post.",
+    })
+
+    assert response.status_code == 502
+    assert "provider_authentication_failed" in response.json()["detail"]
+    assert "Verify the key is active" in response.json()["detail"]
+    assert "sensitive details" not in response.json()["detail"]
+    runs = client.get(f"/api/v1/workspaces/{workspace_id}/agent-runs").json()
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["error_code"] == "provider_authentication_failed"
+
+
 def test_unscoped_model_source_reference_is_rejected(client, monkeypatch):
     from app.ai_provider import Generation, MockProvider
     import app.ai_workflows as workflows

@@ -92,6 +92,16 @@ def linkedin_publishing_enabled() -> bool:
     return os.getenv("PUBLISHING_ENABLED", "false").strip().lower() == "true"
 
 
+def normalize_linkedin_scopes(scopes: list[str] | None) -> list[str]:
+    normalized = {
+        scope.strip()
+        for value in scopes or []
+        for scope in value.replace(",", " ").split()
+        if scope.strip()
+    }
+    return sorted(normalized)
+
+
 def create_state() -> tuple[str, str, datetime]:
     raw_state = secrets.token_urlsafe(32)
     return raw_state, hashlib.sha256(raw_state.encode()).hexdigest(), datetime.now(timezone.utc) + STATE_TTL
@@ -204,9 +214,9 @@ def _parse_token_response(response: httpx.Response, requested_scopes: list[str])
         raise LinkedInRequestError("LinkedIn returned incomplete token information.")
     scopes_value = payload.get("scope")
     if scopes_value is None:
-        scopes = requested_scopes
+        scopes = normalize_linkedin_scopes(requested_scopes)
     elif isinstance(scopes_value, str):
-        scopes = sorted(set(scopes_value.split()))
+        scopes = normalize_linkedin_scopes([scopes_value])
     else:
         raise LinkedInRequestError("LinkedIn returned invalid permission information.")
     refresh_token = payload.get("refresh_token") or ""

@@ -48,6 +48,7 @@ from app.linkedin_oauth import (
     fetch_profile,
     linkedin_publishing_enabled,
     linkedin_settings,
+    normalize_linkedin_scopes,
 )
 from app.publishing import dispatch_job
 from app.security import bearer, create_session, current_user, password_hash, require_role, workspace_member
@@ -55,6 +56,7 @@ from app.social_capabilities import (
     capability_catalog_response,
     capability_rows_for_account,
     has_enabled_capability,
+    reconcile_linkedin_publish_capability,
 )
 
 
@@ -416,7 +418,7 @@ def execute_ai(db: Session, organization_id: int, user_id: int, agent_name: str,
         db.commit()
         raise HTTPException(
             status_code=502,
-            detail=f"AI workflow failed ({error.code}); run {error.run.id} is available in Agent Activity.",
+            detail=f"AI workflow failed: {str(error)} (code: {error.code}); run {error.run.id} is available in Agent Activity.",
         ) from error
 
 
@@ -639,6 +641,14 @@ def list_accounts(workspace_id: int, user: User = Depends(current_user), db: Ses
     accounts = db.scalars(select(SocialAccount).where(
         SocialAccount.organization_id == workspace_id
     ).order_by(SocialAccount.id)).all()
+    capabilities_changed = False
+    for account in accounts:
+        if reconcile_linkedin_publish_capability(db, account):
+            capabilities_changed = True
+            audit(db, workspace_id, user.id, "linkedin.publish_capability_reconciled",
+                  "social_account", account.id)
+    if capabilities_changed:
+        db.commit()
     return [
         {
             **as_dict(account),
@@ -724,11 +734,30 @@ def linkedin_callback(
               {"reason": "initiating_membership_inactive"})
         db.commit()
         return linkedin_result_redirect("connection_failed")
-    if error or not code:
+    if error == "user_cancelled_login":
         audit(db, oauth_state.organization_id, oauth_state.actor_id,
-              "linkedin.oauth_cancelled", "integration", "linkedin")
+              "linkedin.oauth_cancelled", "integration", "linkedin",
+              {"reason": "user_cancelled_login"})
         db.commit()
         return linkedin_result_redirect("cancelled")
+    if error == "user_cancelled_authorize":
+        audit(db, oauth_state.organization_id, oauth_state.actor_id,
+              "linkedin.oauth_permission_declined", "integration", "linkedin",
+              {"reason": "user_cancelled_authorize"})
+        db.commit()
+        return linkedin_result_redirect("permission_denied")
+    if error:
+        audit(db, oauth_state.organization_id, oauth_state.actor_id,
+              "linkedin.oauth_failed", "integration", "linkedin",
+              {"reason": "provider_oauth_error"})
+        db.commit()
+        return linkedin_result_redirect("connection_failed")
+    if not code:
+        audit(db, oauth_state.organization_id, oauth_state.actor_id,
+              "linkedin.oauth_failed", "integration", "linkedin",
+              {"reason": "authorization_code_missing"})
+        db.commit()
+        return linkedin_result_redirect("connection_failed")
     db.commit()
 
     try:
@@ -763,6 +792,7 @@ def linkedin_callback(
         account.is_mock = False
         account.active = True
 
+    granted_scopes = normalize_linkedin_scopes(token.scopes)
     credential = db.scalar(select(LinkedInCredential).where(
         LinkedInCredential.organization_id == oauth_state.organization_id,
         LinkedInCredential.social_account_id == account.id,
@@ -777,7 +807,7 @@ def linkedin_callback(
                 encrypt_token(token.refresh_token, settings.encryption_key)
                 if token.refresh_token else ""
             ),
-            granted_scopes=token.scopes,
+            granted_scopes=granted_scopes,
             access_token_expires_at=token.expires_at,
             refresh_token_expires_at=token.refresh_expires_at,
         )
@@ -787,7 +817,7 @@ def linkedin_callback(
         credential.access_token_ciphertext = encrypt_token(token.access_token, settings.encryption_key)
         if token.refresh_token:
             credential.refresh_token_ciphertext = encrypt_token(token.refresh_token, settings.encryption_key)
-        credential.granted_scopes = token.scopes
+        credential.granted_scopes = granted_scopes
         credential.access_token_expires_at = token.expires_at
         if token.refresh_expires_at:
             credential.refresh_token_expires_at = token.refresh_expires_at
@@ -807,7 +837,7 @@ def linkedin_callback(
     oauth_capability.reason = "LinkedIn OAuth connection is active."
     oauth_capability.required_permissions = ["openid", "profile"]
     publish_capability = by_name["publish"]
-    has_publish_permission = "w_member_social" in token.scopes
+    has_publish_permission = "w_member_social" in granted_scopes
     publishing_enabled = linkedin_publishing_enabled()
     publish_capability.status = (
         "available" if has_publish_permission and publishing_enabled
@@ -831,7 +861,7 @@ def linkedin_callback(
 
     audit(db, oauth_state.organization_id, oauth_state.actor_id,
           "linkedin.connected", "social_account", account.id,
-          {"scopes": token.scopes, "publish_enabled": publish_capability.enabled})
+          {"scopes": granted_scopes, "publish_enabled": publish_capability.enabled})
     db.commit()
     return linkedin_result_redirect("connected")
 
@@ -1027,6 +1057,10 @@ def submit_approval(workspace_id: int, item_id: int, payload: SubmissionRequest,
     ))
     if account is None:
         raise HTTPException(status_code=404, detail="Active connected account for this platform not found")
+    if account.is_mock is not True and reconcile_linkedin_publish_capability(db, account):
+        audit(db, workspace_id, user.id, "linkedin.publish_capability_reconciled",
+              "social_account", account.id)
+        db.commit()
     if not has_enabled_capability(db, account, "publish"):
         raise HTTPException(status_code=409, detail="The selected account does not have publish permission")
     if account.is_mock is not True:
@@ -1036,7 +1070,7 @@ def submit_approval(workspace_id: int, item_id: int, payload: SubmissionRequest,
             LinkedInCredential.organization_id == workspace_id,
             LinkedInCredential.social_account_id == account.id,
         ))
-        if credential is None or "w_member_social" not in credential.granted_scopes:
+        if credential is None or "w_member_social" not in normalize_linkedin_scopes(credential.granted_scopes):
             raise HTTPException(status_code=409, detail="LinkedIn publishing requires the w_member_social permission")
     review = db.scalar(select(QualityReview).where(
         QualityReview.organization_id == workspace_id,
@@ -1894,7 +1928,7 @@ def create_research(workspace_id: int, payload: ResearchRequest, user: User = De
         db.commit()
         raise HTTPException(
             status_code=502,
-            detail=f"Research workflow failed ({error.code}); run {error.run.id} is available in Agent Activity.",
+            detail=f"Research workflow failed: {str(error)} (code: {error.code}); run {error.run.id} is available in Agent Activity.",
         ) from error
     record.status = "completed"
     record.agent_run_id = run.id
