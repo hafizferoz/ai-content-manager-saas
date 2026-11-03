@@ -13,6 +13,7 @@ A working Phase 1 foundation with a Phase 2 AI workflow slice for multi-tenant s
 - Responsive web dashboard to exercise the workflow without platform credentials.
 - PostgreSQL/Redis/API/worker/web Docker Compose setup.
 - Source-linked research and structured Market Intelligence, Content Strategist, Cross-Platform Copywriter, Creative Director, and Quality/Brand Safety workflows.
+- Persisted campaign strategy history with source and agent-run traceability.
 - Tenant-scoped agent run history, token usage records, and approximate text-only platform previews.
 
 Real social network APIs, file uploads, calendar scheduling, analytics ingestion, and production identity-provider integration are not enabled. Mock AI is the default; an optional server-configured OpenAI-compatible LLM provider is supported. The mock social adapter never sends an external post.

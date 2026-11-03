@@ -239,7 +239,8 @@ missing-permission explanations in the UI.
 Core tables/entities: - `users`, `organizations`,
 `organization_memberships` - `brand_profiles`, `brand_documents`,
 `audience_personas` - `research_records`, `research_sources`,
-`campaigns` - `content_items`, `content_versions`, `media_assets` -
+`campaigns`, `campaign_strategies` - `content_items`,
+`content_versions`, `media_assets` -
 `quality_reviews`, `approval_records` - `social_accounts`,
 `social_account_capabilities` - `publish_jobs`, `published_posts` -
 `engagement_events`, `analytics_snapshots` - `agent_runs`,

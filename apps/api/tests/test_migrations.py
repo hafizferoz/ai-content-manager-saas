@@ -26,7 +26,7 @@ def test_clean_database_migrates_to_head(tmp_path, monkeypatch):
         assert {
             "users", "session_tokens", "organizations", "memberships", "brand_profiles", "campaigns",
             "content_items", "content_versions", "quality_reviews", "approvals",
-            "social_accounts", "publish_jobs", "mock_publications", "audit_logs",
+            "social_accounts", "publish_jobs", "mock_publications", "audit_logs", "campaign_strategies",
         } <= tables
         approval_columns = {column["name"] for column in inspect(engine).get_columns("approvals")}
         assert "brand_fingerprint" in approval_columns
@@ -75,7 +75,9 @@ def test_ai_migration_upgrades_phase_one_schema(tmp_path):
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
-        for table_name in ("usage_events", "agent_runs", "research_sources", "research_records"):
+        for table_name in (
+            "campaign_strategies", "usage_events", "agent_runs", "research_sources", "research_records"
+        ):
             connection.exec_driver_sql(f"DROP TABLE {table_name}")
         connection.exec_driver_sql("ALTER TABLE quality_reviews DROP COLUMN agent_run_id")
         connection.exec_driver_sql("ALTER TABLE quality_reviews DROP COLUMN review_type")
