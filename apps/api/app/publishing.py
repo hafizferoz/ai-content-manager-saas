@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.domain import fingerprint_brand
+from app.linkedin_oauth import linkedin_publishing_enabled
 from app.social_adapters import adapter_for_account
 from app.social_capabilities import has_enabled_capability
 from app.models import (
@@ -47,10 +48,20 @@ def validate_publish_authorization(db: Session, job: PublishJob) -> tuple[Approv
     brand = db.scalar(select(BrandProfile).where(BrandProfile.organization_id == job.organization_id))
     if fingerprint_brand(brand) != approval.brand_fingerprint:
         raise ValueError("Approval was invalidated by a brand guidance change")
-    if approval.destination.strip() == "" or account.is_mock is not True or account.platform != item.platform:
-        raise ValueError("Only active mock accounts with a valid destination are supported")
-    if not has_enabled_capability(db, account, "publish"):
-        raise ValueError("This social account does not have the publish capability enabled")
+    if approval.destination.strip() == "" or account.platform != item.platform:
+        raise ValueError("The account and approved destination are not valid for this content")
+    if account.is_mock is True:
+        if not has_enabled_capability(db, account, "publish"):
+            raise ValueError("This social account does not have the publish capability enabled")
+    elif account.platform == "linkedin":
+        if not linkedin_publishing_enabled():
+            raise ValueError("LinkedIn publishing is disabled by the operator")
+        if approval.destination != account.external_account_id:
+            raise ValueError("LinkedIn approval destination does not match the connected member")
+        if not has_enabled_capability(db, account, "publish"):
+            raise ValueError("This LinkedIn account does not have the publish permission enabled")
+    else:
+        raise ValueError("No official social adapter is configured for this account")
     return approval, version, account
 
 
@@ -75,10 +86,11 @@ def dispatch_job(job_id: int) -> str:
             job = db.scalar(select(PublishJob).where(PublishJob.id == job_id).with_for_update())
             if job is None:
                 raise ValueError("Publish job not found")
-            # Revalidate at dispatch and again immediately before the provider call.
-            validate_publish_authorization(db, job)
+            # Prepare credentials first, then revalidate immediately before adapter dispatch.
             approval, version, account = validate_publish_authorization(db, job)
             adapter = adapter_for_account(account)
+            adapter.prepare(db, job, approval, version, account)
+            approval, version, account = validate_publish_authorization(db, job)
             post_id = adapter.publish(db, job, approval, version, account)
             job.provider_post_id = post_id
             job.status = "published"

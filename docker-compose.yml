@@ -36,6 +36,14 @@ services:
       AUTO_CREATE_SCHEMA: "false"
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-content_manager}:${POSTGRES_PASSWORD:-change-me-local-only}@postgres:5432/${POSTGRES_DB:-content_manager}
       CORS_ORIGINS: http://localhost:3000
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:8000}
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:3000}
+      LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
+      LINKEDIN_REDIRECT_URI: ${LINKEDIN_REDIRECT_URI:-http://localhost:8000/api/v1/integrations/linkedin/callback}
+      LINKEDIN_API_VERSION: ${LINKEDIN_API_VERSION:-202610}
+      SOCIAL_TOKEN_ENCRYPTION_KEY: ${SOCIAL_TOKEN_ENCRYPTION_KEY:-}
+      PUBLISHING_ENABLED: ${PUBLISHING_ENABLED:-false}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -59,6 +67,12 @@ services:
     environment:
       APP_ENV: local
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-content_manager}:${POSTGRES_PASSWORD:-change-me-local-only}@postgres:5432/${POSTGRES_DB:-content_manager}
+      LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
+      LINKEDIN_REDIRECT_URI: ${LINKEDIN_REDIRECT_URI:-http://localhost:8000/api/v1/integrations/linkedin/callback}
+      LINKEDIN_API_VERSION: ${LINKEDIN_API_VERSION:-202610}
+      SOCIAL_TOKEN_ENCRYPTION_KEY: ${SOCIAL_TOKEN_ENCRYPTION_KEY:-}
+      PUBLISHING_ENABLED: ${PUBLISHING_ENABLED:-false}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}

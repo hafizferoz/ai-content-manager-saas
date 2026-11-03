@@ -1,8 +1,9 @@
 # Implementation Status
 
-**Current status:** Phase 1 foundation, Phase 2 AI workflows, and the
-Phase 3 capability-registry foundation are implemented and covered by
-automated tests. Real social OAuth and platform APIs are not enabled.
+**Current status:** Phase 1 and Phase 2 slices are implemented. Phase 3
+includes tested LinkedIn OAuth and a text-only member-post adapter;
+live LinkedIn app/account verification and other platforms remain
+outstanding.
 
 ## Repository assessment
 
@@ -46,15 +47,22 @@ automated tests. Real social OAuth and platform APIs are not enabled.
 ## Phase 3 --- Real social integrations
 
 -   [x] Tenant-scoped capability registry and mock adapter boundary
--   [ ] Secure OAuth state, token encryption, and refresh lifecycle
--   [ ] Encrypted token storage and refresh
--   [ ] LinkedIn integration verified against current requirements
+-   [x] LinkedIn OAuth authorization-code connection with hashed, expiring, single-use state
+-   [x] Fernet-encrypted LinkedIn access and refresh token persistence
+-   [x] LinkedIn text-only member post adapter gated by `w_member_social` and human approval
+-   [x] LinkedIn profile identity, account disconnect, and permission-aware capabilities
+-   [x] Real publishing defaults off and requires explicit `PUBLISHING_ENABLED=true`
+-   [x] LinkedIn HTTP 429 classification with explicit Retry-After wait and operator-authorized retry
+-   [x] Owner/admin-only, audited manual reconciliation for uncertain LinkedIn outcomes
+-   [ ] Production LinkedIn credential/key rotation, remote revocation, and live app/permission verification
+-   [ ] Refresh lifecycle verified against an app approved for LinkedIn refresh tokens
+-   [ ] Live LinkedIn callback and post verified against the configured app and account
 -   [ ] Instagram integration verified against current requirements
 -   [ ] Facebook integration verified against current requirements
 -   [ ] YouTube integration verified against current requirements
 -   [ ] X integration verified against current requirements
 -   [ ] TikTok integration verified against current requirements
--   [ ] Rate limiting, reconciliation, adapter contract tests
+-   [ ] Automated rate-limit scheduling, platform-wide rate-limit controls, and provider-backed reconciliation
 
 ## Phase 4 --- Analytics/community
 
@@ -75,7 +83,7 @@ automated tests. Real social OAuth and platform APIs are not enabled.
 
 ## Known limitations
 
--   Social publishing is mock-only; real social APIs are intentionally unavailable.
+-   LinkedIn authorization and a text-only member-post adapter are implemented but require app-specific credentials, a registered callback URL, token-encryption key, and approved `w_member_social` permission before the real path can be exercised. Other social publishing remains mock-only.
 -   AI uses a deterministic mock by default. A versioned synthetic corpus checks structured outputs, source scoping, and selected brand-safety expectations; provider-specific live quality baselines, budgets, and deployment secrets management are not production-ready.
 -   Research stores user-supplied source URLs and excerpts; URL fetching/crawling and independent source verification are intentionally not implemented.
 -   Mock token counts are estimates and provider costs may be unknown; usage reporting currently retains up to 1,000 most recent events per workspace.
@@ -84,6 +92,7 @@ automated tests. Real social OAuth and platform APIs are not enabled.
 -   AI review and strategy outputs are advisory; they do not establish factual accuracy, legal compliance, content rights, or platform approval.
 -   Media manifest metadata is versioned, but uploads/private storage and media processing are not implemented.
 -   Campaign editing/deletion, content library media upload, calendar scheduling, notifications, analytics, and operator reconciliation tools remain incomplete.
--   Publish jobs in `dispatching` or `reconciliation_required` need an operator workflow; no blind automatic retries are performed.
+-   LinkedIn publish timeouts and server errors require manual verification. Owner/admin users can record a confirmed LinkedIn post URN or authorize a retry only after confirming no post exists; HTTP 429 responses are blocked until the operator waits for `Retry-After` and confirms no post was created. No blind automatic retries or provider-side post lookup are performed. LinkedIn read-post permissions may be restricted and are not requested.
+-   Operator reconciliation is currently LinkedIn-specific and is not a substitute for provider-backed verification. Mock publishing remains idempotent; LinkedIn does not receive an assumed idempotency guarantee from its Posts API.
 -   Production hosting, authentication provider, retention policy, and billing model remain undecided.
 -   Real publishing depends on current platform API access, app review, OAuth scopes, account eligibility, and restrictions.
