@@ -1,10 +1,30 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 type AnyRecord = Record<string, any>;
 type Workspace = { id: number; name: string; role: string };
+type NoticeTone = "error" | "info" | "success";
+type MessageDialogOptions = {
+  kind: "confirm" | "text" | "textarea" | "select";
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  tone?: "primary" | "danger";
+  initialValue?: string;
+  placeholder?: string;
+  required?: boolean;
+  minLength?: number;
+  maxLength?: number;
+  options?: { label: string; value: string }[];
+};
+type MessageDialogState = MessageDialogOptions & {
+  value: string;
+  error: string;
+  resolve: (value: string | null) => void;
+};
 const tabs = ["Overview", "Brand", "Campaigns", "Research", "AI Studio", "Content", "Approvals", "Accounts", "Publishing", "Analytics", "Community", "Agent Activity", "Usage", "Team", "Audit"];
 
 export default function Home() {
@@ -13,7 +33,7 @@ export default function Home() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [user, setUser] = useState<AnyRecord | null>(null);
   const [tab, setTab] = useState("Overview");
-  const [notice, setNotice] = useState("");
+  const [notice, setNoticeState] = useState<{ message: string; tone: NoticeTone } | null>(null);
   const [data, setData] = useState<AnyRecord[]>([]);
   const [brand, setBrand] = useState<AnyRecord>({ name: "", value_proposition: "", audience: "", tone: "", preferred_vocabulary: [], prohibited_claims: [] });
   const [usage, setUsage] = useState<AnyRecord | null>(null);
@@ -32,6 +52,88 @@ export default function Home() {
     submitting: boolean;
     error: string;
   } | null>(null);
+  const [messageDialog, setMessageDialog] = useState<MessageDialogState | null>(null);
+  const previousDialogFocus = useRef<HTMLElement | null>(null);
+
+  function setNotice(message: string, tone: NoticeTone = "info") {
+    setNoticeState(message ? { message, tone } : null);
+  }
+
+  function openMessageDialog(options: MessageDialogOptions): Promise<string | null> {
+    rememberDialogFocus();
+    return new Promise((resolve) => setMessageDialog({
+      ...options,
+      value: options.initialValue ?? options.options?.[0]?.value ?? "",
+      error: "",
+      resolve,
+    }));
+  }
+
+  function rememberDialogFocus() {
+    if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+      previousDialogFocus.current = document.activeElement;
+    }
+  }
+
+  function handleDialogKeyDown(event: ReactKeyboardEvent<HTMLDivElement>, canClose = true) {
+    if (event.key === "Escape" && canClose) {
+      finishMessageDialog(null);
+      setApprovalRequest((current) => current && !current.submitting ? null : current);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    );
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function finishMessageDialog(value: string | null) {
+    if (!messageDialog) return;
+    if (value !== null && messageDialog.kind !== "confirm") {
+      const trimmed = value.trim();
+      if (messageDialog.required && !trimmed) {
+        setMessageDialog({ ...messageDialog, error: "Enter a value to continue." });
+        return;
+      }
+      if (messageDialog.minLength && trimmed.length < messageDialog.minLength) {
+        setMessageDialog({ ...messageDialog, error: `Enter at least ${messageDialog.minLength} characters.` });
+        return;
+      }
+    }
+    messageDialog.resolve(value);
+    setMessageDialog(null);
+  }
+
+  function handleInvalidFormField(event: FormEvent<HTMLElement>) {
+    const field = event.target;
+    if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement || field instanceof HTMLSelectElement)) return;
+    event.preventDefault();
+    const invalidField = field.form?.querySelector<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(":invalid") ?? field;
+    invalidField.focus();
+    const label = invalidField.labels?.[0]?.textContent?.trim() || invalidField.getAttribute("aria-label") || "This field";
+    const detail = invalidField.validity.valueMissing
+      ? "is required"
+      : invalidField.validity.tooShort
+        ? `must contain at least ${"minLength" in invalidField ? invalidField.minLength : 0} characters`
+        : invalidField.validity.tooLong
+          ? `must contain no more than ${"maxLength" in invalidField ? invalidField.maxLength : 0} characters`
+          : invalidField.validity.typeMismatch
+            ? `must be a valid ${invalidField.type}`
+            : invalidField.validity.rangeUnderflow || invalidField.validity.rangeOverflow
+              ? "is outside the allowed range"
+              : "needs attention";
+    setNotice(`${label} ${detail}. Review the field and try again.`, "error");
+  }
 
   const request = useCallback(async (path: string, init: RequestInit = {}) => {
     const response = await fetch(`${API}${path}`, {
@@ -80,7 +182,7 @@ export default function Home() {
         setData(routes[tab] ? await request(routes[tab]) : []);
       }
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not load workspace");
+      setNotice(error instanceof Error ? error.message : "Could not load workspace", "error");
     } finally {
       setLoading(false);
     }
@@ -100,6 +202,7 @@ export default function Home() {
             : connectionStatus === "permission_denied"
               ? "LinkedIn authorization was declined or a requested permission is unavailable. Check the app's approved Products/scopes in the LinkedIn Developer Portal, then try again."
               : "LinkedIn did not complete authorization. Check that the exact callback URL is registered and the requested app permissions are approved, then retry. No account was connected.",
+        connectionStatus === "connected" ? "success" : connectionStatus === "cancelled" ? "info" : "error",
       );
       window.history.replaceState({}, "", window.location.pathname);
     }
@@ -118,6 +221,16 @@ export default function Home() {
   }, [request, token]);
 
   useEffect(() => { void loadWorkspace(); }, [loadWorkspace]);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNoticeState(null), notice.tone === "error" ? 10000 : 7000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+  useEffect(() => {
+    if (messageDialog || approvalRequest || !previousDialogFocus.current) return;
+    previousDialogFocus.current.focus();
+    previousDialogFocus.current = null;
+  }, [approvalRequest, messageDialog]);
 
   async function submit(event: FormEvent<HTMLFormElement>, path: string, method = "POST", payload?: AnyRecord) {
     event.preventDefault();
@@ -126,11 +239,11 @@ export default function Home() {
     if (values.campaign_id === "") values.campaign_id = null;
     try {
       await request(path, { method, body: JSON.stringify(values) });
-      setNotice("Saved successfully.");
+      setNotice("Saved successfully.", "success");
       await loadWorkspace();
       form.reset();
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Request failed");
+      setNotice(error instanceof Error ? error.message : "Request failed", "error");
     }
   }
 
@@ -138,10 +251,10 @@ export default function Home() {
     try {
       const result = await request(path, { method: "POST", body: JSON.stringify(payload) });
       setAiResult(result);
-      setNotice("Workflow completed. Review the structured output before using it.");
+      setNotice("Workflow completed. Review the structured output before using it.", "success");
       await loadWorkspace();
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "AI workflow failed");
+      setNotice(error instanceof Error ? error.message : "AI workflow failed", "error");
     }
   }
 
@@ -159,7 +272,7 @@ export default function Home() {
       setWorkspaces(workspaces);
       setWorkspace(workspaces[0]);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Authentication failed");
+      setNotice(error instanceof Error ? error.message : "Authentication failed", "error");
     }
   }
 
@@ -169,6 +282,7 @@ export default function Home() {
   }
 
   async function openApprovalRequest(content: AnyRecord) {
+    rememberDialogFocus();
     try {
       const workspaceAccounts = await request(`${base}/social-accounts`);
       const platformAccounts = workspaceAccounts.filter((account: AnyRecord) => account.platform === content.platform);
@@ -181,7 +295,8 @@ export default function Home() {
         error: "",
       });
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not load accounts for approval");
+      previousDialogFocus.current = null;
+      setNotice(error instanceof Error ? error.message : "Could not load accounts for approval", "error");
     }
   }
 
@@ -215,7 +330,7 @@ export default function Home() {
       setApprovalRequest(null);
       setNotice(account.is_mock
         ? `Submitted for approval to mock account "${account.display_name}". This will not publish externally.`
-        : `Submitted for approval to live LinkedIn account "${account.display_name}". A separate authorized approver must approve before the worker can publish.`);
+        : `Submitted for approval to live LinkedIn account "${account.display_name}". A separate authorized approver must approve before the worker can publish.`, "success");
       await loadWorkspace();
     } catch (error) {
       setApprovalRequest((current) => current ? {
@@ -227,14 +342,14 @@ export default function Home() {
   }
 
   if (!token || !workspace) {
-    return <main className="auth-page">
+    return <main className="auth-page" onInvalidCapture={handleInvalidFormField}>
       <section className="auth-card">
         <div className="brand-mark">AC</div>
         <p className="eyebrow">YOUR CONTENT WORKSPACE</p>
         <h1>Make good content.<br /><span>Keep humans in control.</span></h1>
         <p className="muted">Plan campaigns, review drafts, and publish only after an authorized person approves.</p>
         <AuthForms onSubmit={authenticate} />
-        {notice && <p className="notice" role="status">{notice}</p>}
+        {notice && <p className={`auth-notice ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"}>{notice.message}</p>}
       </section>
     </main>;
   }
@@ -258,30 +373,94 @@ export default function Home() {
       <nav aria-label="Main navigation">{tabs.map((name) => <button key={name} className={tab === name ? "nav-item selected" : "nav-item"} onClick={() => setTab(name)}>{name}</button>)}</nav>
       <div className="sidebar-foot">LinkedIn publishing may be live<br />External posts require server-side human approval.</div>
     </aside>
-    <section className="main-area">
+    <section className="main-area" onInvalidCapture={handleInvalidFormField}>
       <header className="topbar"><div><span className="muted">Workspace / </span>{tab}</div><div className="user-chip">{workspaces.length > 1 && <select aria-label="Switch workspace" value={workspace.id} onChange={(event) => setWorkspace(workspaces.find((item) => item.id === Number(event.target.value)) ?? null)}>{workspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}{user?.name}<button onClick={async () => { await request("/api/v1/auth/session", { method: "DELETE" }).catch(() => null); window.localStorage.removeItem("acm-token"); setToken(""); setWorkspace(null); setWorkspaces([]); }}>Sign out</button></div></header>
       <div className="page-content">
         <div className="page-heading"><div><p className="eyebrow">CONTENT OPERATIONS</p><h1>{tab}</h1><p className="muted">Prepare, review, and publish content with a human approval gate.</p></div><button className="secondary" onClick={() => void refresh()}>Refresh</button></div>
-        {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice("")}>Dismiss</button></div>}
+        {notice && <div className={`toast ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} aria-live={notice.tone === "error" ? "assertive" : "polite"}>
+          <span className="toast-indicator" aria-hidden="true">{notice.tone === "error" ? "!" : notice.tone === "success" ? "✓" : "i"}</span>
+          <p>{notice.message}</p>
+          <button aria-label="Dismiss notification" onClick={() => setNotice("")}>Dismiss</button>
+        </div>}
+        {messageDialog && <div
+          className="modal-backdrop"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) finishMessageDialog(null);
+          }}
+          onKeyDown={(event) => {
+            handleDialogKeyDown(event);
+          }}
+        >
+          <form
+            className="message-dialog panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="message-dialog-title"
+            aria-describedby="message-dialog-description"
+            onSubmit={(event) => {
+              event.preventDefault();
+              finishMessageDialog(messageDialog.kind === "confirm" ? "confirmed" : messageDialog.value);
+            }}
+          >
+            <div className="panel-heading">
+              <h2 id="message-dialog-title">{messageDialog.title}</h2>
+            </div>
+            <p id="message-dialog-description" className="dialog-message">{messageDialog.message}</p>
+            {messageDialog.kind === "text" && <input
+              autoFocus
+              aria-label={messageDialog.title}
+              aria-invalid={Boolean(messageDialog.error)}
+              aria-describedby={messageDialog.error ? "message-dialog-error" : "message-dialog-description"}
+              placeholder={messageDialog.placeholder}
+              value={messageDialog.value}
+              maxLength={messageDialog.maxLength}
+              onChange={(event) => setMessageDialog({ ...messageDialog, value: event.target.value, error: "" })}
+            />}
+            {messageDialog.kind === "textarea" && <textarea
+              autoFocus
+              aria-label={messageDialog.title}
+              aria-invalid={Boolean(messageDialog.error)}
+              aria-describedby={messageDialog.error ? "message-dialog-error" : "message-dialog-description"}
+              placeholder={messageDialog.placeholder}
+              value={messageDialog.value}
+              maxLength={messageDialog.maxLength}
+              rows={7}
+              onChange={(event) => setMessageDialog({ ...messageDialog, value: event.target.value, error: "" })}
+            />}
+            {messageDialog.kind === "select" && <label className="dialog-select-label">
+              <span>Verified outcome</span>
+              <select autoFocus aria-invalid={Boolean(messageDialog.error)} aria-describedby={messageDialog.error ? "message-dialog-error" : "message-dialog-description"} value={messageDialog.value} onChange={(event) => setMessageDialog({ ...messageDialog, value: event.target.value, error: "" })}>
+                {messageDialog.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>}
+            {messageDialog.error && <p id="message-dialog-error" className="dialog-error" role="alert">{messageDialog.error}</p>}
+            <div className="dialog-actions">
+              <button className="secondary" type="button" autoFocus={messageDialog.kind === "confirm"} onClick={() => finishMessageDialog(null)}>{messageDialog.cancelLabel ?? "Cancel"}</button>
+              <button className={messageDialog.tone === "danger" ? "danger" : "primary"} type="submit">{messageDialog.confirmLabel ?? "Continue"}</button>
+            </div>
+          </form>
+        </div>}
         {approvalRequest && <div
           className="modal-backdrop"
           onClick={(event) => {
             if (event.target === event.currentTarget && !approvalRequest.submitting) setApprovalRequest(null);
           }}
           onKeyDown={(event) => {
-            if (event.key === "Escape" && !approvalRequest.submitting) setApprovalRequest(null);
+            handleDialogKeyDown(event, !approvalRequest.submitting);
           }}
         >
-          <section className="approval-dialog panel" role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title">
-            <div className="panel-heading">
-              <div><p className="eyebrow">CONTENT APPROVAL</p><h2 id="approval-dialog-title">Choose a destination</h2></div>
-              <button className="link-button" aria-label="Close dialog" autoFocus disabled={approvalRequest.submitting} onClick={() => setApprovalRequest(null)}>Close</button>
-            </div>
-            <p className="muted">Select the account for <strong>{approvalRequest.content.title}</strong> in <strong>{workspace.name}</strong>. Approval will be tied to this exact account and destination.</p>
+          <section className="approval-dialog panel" role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title" aria-describedby="approval-dialog-description">
+            <div className="panel-heading"><div><p className="eyebrow">CONTENT APPROVAL</p><h2 id="approval-dialog-title">Choose a destination</h2></div></div>
+            <p id="approval-dialog-description" className="muted">Select the account for <strong>{approvalRequest.content.title}</strong> in <strong>{workspace.name}</strong>. Approval will be tied to this exact account and destination.</p>
             <div className="approval-account-list">
               {approvalRequest.accounts.map((account) => {
                 const capability = account.capabilities?.find((item: AnyRecord) => item.capability === "publish");
                 const ready = account.active && capability?.enabled === true && capability.status === "available";
+                const firstReadyAccountId = approvalRequest.accounts.find((candidate) =>
+                  candidate.active && candidate.capabilities?.some((item: AnyRecord) =>
+                    item.capability === "publish" && item.enabled === true && item.status === "available",
+                  ),
+                )?.id;
                 const label = !account.active ? "INACTIVE" : account.is_mock ? "MOCK" : "LIVE";
                 const reason = !account.active
                   ? "This account is inactive or disconnected."
@@ -293,6 +472,7 @@ export default function Home() {
                     type="radio"
                     name="approval-destination"
                     value={account.id}
+                    autoFocus={account.id === firstReadyAccountId}
                     checked={approvalRequest.selectedAccountId === account.id}
                     disabled={!ready || approvalRequest.submitting}
                     onChange={() => setApprovalRequest((current) => current ? {
@@ -344,7 +524,7 @@ export default function Home() {
             })()}
             {approvalRequest.error && <p className="dialog-error" role="alert">{approvalRequest.error}</p>}
             <div className="dialog-actions">
-              <button className="secondary" disabled={approvalRequest.submitting} onClick={() => setApprovalRequest(null)}>Cancel</button>
+              <button className="secondary" autoFocus={!approvalRequest.accounts.some((account) => account.active && account.capabilities?.some((capability: AnyRecord) => capability.capability === "publish" && capability.enabled === true && capability.status === "available"))} disabled={approvalRequest.submitting} onClick={() => setApprovalRequest(null)}>Cancel</button>
               {approvalRequest.accounts.length === 0 && <button className="secondary" onClick={() => { setApprovalRequest(null); setTab("Accounts"); }}>Open Accounts</button>}
               <button
                 className="primary"
@@ -447,7 +627,15 @@ export default function Home() {
         {tab === "Content" && <>{contentForm}<RecordList rows={data} kind="content" onAction={async (row, action) => {
           try {
             if (action === "revise") {
-              const body = window.prompt("Edit the draft copy. Saving creates a new immutable version.", row.version?.body ?? "");
+              const body = await openMessageDialog({
+                kind: "textarea",
+                title: "Create a new content version",
+                message: "Edit the draft copy. Saving creates an immutable version and invalidates earlier approvals.",
+                initialValue: row.version?.body ?? "",
+                required: true,
+                maxLength: 3000,
+                confirmLabel: "Save new version",
+              });
               if (body === null) return;
               await request(`${base}/content/${row.id}/versions`, {
                 method: "POST",
@@ -460,28 +648,35 @@ export default function Home() {
                   source_references: row.version?.source_references ?? [],
                 }),
               });
-              setNotice("New version saved. Any earlier approval has been invalidated.");
+              setNotice("New version saved. Any earlier approval has been invalidated.", "success");
             } else if (action === "preview") {
               setPreview(await request(`${base}/content/${row.id}/platform-preview`));
               setNotice("Preview is approximate and text-only; confirm platform capability before publishing.");
             } else if (action === "ai-review") {
               const result = await request(`${base}/content/${row.id}/ai-review`, { method: "POST" });
-              setNotice(result.passed ? "Advisory AI review complete; verify its findings." : "AI review requires changes before approval.");
+              setNotice(result.passed ? "Advisory AI review complete; verify its findings." : "AI review requires changes before approval.", result.passed ? "success" : "error");
             } else if (action === "quality") {
               const result = await request(`${base}/content/${row.id}/quality-check`, { method: "POST" });
-              setNotice(result.passed ? "Quality checks passed with a review reminder." : `Review blocked: ${result.findings.filter((f: AnyRecord) => f.severity === "blocking").map((f: AnyRecord) => f.message).join(" ")}`);
+              setNotice(result.passed ? "Quality checks passed with a review reminder." : `Review blocked: ${result.findings.filter((f: AnyRecord) => f.severity === "blocking").map((f: AnyRecord) => f.message).join(" ")}`, result.passed ? "success" : "error");
             } else {
               await openApprovalRequest(row);
               return;
             }
             await loadWorkspace();
-          } catch (error) { setNotice(error instanceof Error ? error.message : "Action failed"); }
+          } catch (error) { setNotice(error instanceof Error ? error.message : "Action failed", "error"); }
         }} />{preview && <div className="panel preview-panel"><div className="panel-heading"><h2>Approximate {preview.platform} preview</h2><button className="link-button" onClick={() => setPreview(null)}>Close</button></div><p>{preview.preview_text}</p><small>{preview.character_count}/{preview.character_limit} characters · Not an official platform rendering</small><ul>{preview.warnings.map((warning: string) => <li key={warning}>{warning}</li>)}</ul></div>}</>}
         {tab === "Approvals" && <RecordList rows={data} kind="approval" onAction={async (row, action) => {
           try {
-            if (action === "approved" && !row.account_is_mock && !window.confirm(
-              "Approving this LinkedIn post will queue it for live publishing. The configured worker may publish it immediately after server-side validation. Continue?",
-            )) return;
+            if (action === "approved" && !row.account_is_mock) {
+              const confirmed = await openMessageDialog({
+                kind: "confirm",
+                title: "Approve live LinkedIn publishing?",
+                message: "Approving this exact content version and destination will queue it for live publishing. The worker may send it immediately after server-side validation.",
+                confirmLabel: "Approve and queue",
+                tone: "danger",
+              });
+              if (confirmed === null) return;
+            }
             const result = await request(`${base}/approvals/${row.id}/decision`, { method: "POST", body: JSON.stringify({ decision: action, comment: "" }) });
             if (action === "approved") {
               await request(`${base}/publish-jobs`, {
@@ -490,12 +685,12 @@ export default function Home() {
               });
               setNotice(row.account_is_mock
                 ? "Approved and queued for mock publishing."
-                : "Approved and queued for LinkedIn publishing; the worker may dispatch immediately.");
+                : "Approved and queued for LinkedIn publishing; the worker may dispatch immediately.", "success");
             } else {
               setNotice(`Approval ${result.status}.`);
             }
             await loadWorkspace();
-          } catch (error) { setNotice(error instanceof Error ? error.message : "Decision failed"); }
+          } catch (error) { setNotice(error instanceof Error ? error.message : "Decision failed", "error"); }
         }} />}
         {tab === "Agent Activity" && <RecordList rows={data} kind="agent" emptyText="Completed and failed AI runs will appear here with provider, model, timing, outputs, and usage." />}
         {tab === "Usage" && <div className="metric-grid"><Metric label="AI runs with usage" value={usage?.event_count ?? 0} /><Metric label="Input tokens" value={usage?.input_tokens ?? 0} /><Metric label="Output tokens" value={usage?.output_tokens ?? 0} /><Metric label="Estimated token records" value={usage?.estimated_events ?? 0} />{usage && <div className="callout wide">{usage.cost_note}</div>}</div>}
@@ -503,38 +698,74 @@ export default function Home() {
           try {
             const result = await request(`${base}/integrations/linkedin/connect`, { method: "POST" });
             window.location.assign(result.authorization_url);
-          } catch (error) { setNotice(error instanceof Error ? error.message : "Could not start LinkedIn connection"); }
+          } catch (error) { setNotice(error instanceof Error ? error.message : "Could not start LinkedIn connection", "error"); }
         }}>Connect LinkedIn</button></div><form className="panel form-grid" onSubmit={(event) => submit(event, `${base}/social-accounts`)}><h2>Add local mock account</h2><label>Platform<select name="platform"><option value="linkedin">LinkedIn</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="youtube">YouTube</option><option value="x">X</option><option value="tiktok">TikTok</option></select></label><label>Account name<input name="display_name" required /></label><label>Destination ID<input name="external_account_id" required /></label><input type="hidden" name="is_mock" value="true" /><button className="primary">Add mock account</button></form><RecordList rows={data} kind="account" onAction={async (row) => {
-          if (!window.confirm(`Disconnect ${row.display_name} from LinkedIn? Stored credentials will be deleted.`)) return;
+          const confirmed = await openMessageDialog({
+            kind: "confirm",
+            title: "Disconnect LinkedIn account?",
+            message: `Disconnect ${row.display_name}? The saved LinkedIn credentials for this workspace will be deleted.`,
+            confirmLabel: "Disconnect account",
+            tone: "danger",
+          });
+          if (confirmed === null) return;
           try {
             await request(`${base}/social-accounts/${row.id}/connection`, { method: "DELETE" });
-            setNotice("LinkedIn connection disconnected and stored credentials deleted.");
+            setNotice("LinkedIn connection disconnected and stored credentials deleted.", "success");
             await loadWorkspace();
-          } catch (error) { setNotice(error instanceof Error ? error.message : "Disconnect failed"); }
+          } catch (error) { setNotice(error instanceof Error ? error.message : "Disconnect failed", "error"); }
         }} /></>}
         {tab === "Publishing" && <RecordList rows={data} kind="job" onAction={async (row, action) => {
           try {
             if (action === "reconcile") {
               const rateLimited = row.status === "blocked";
-              const outcome = window.prompt(
-                rateLimited
-                  ? "After waiting for LinkedIn Retry-After, enter 'retry' only if you verified no post was created."
-                  : "Enter 'published' only if you verified the post exists, or 'not_published' only if you verified it does not.",
-              );
-              if (!outcome) return;
-              const evidence = window.prompt("Briefly describe how you verified the LinkedIn outcome (20–500 characters). Do not include credentials or tokens.");
-              if (!evidence) return;
+              const outcome = await openMessageDialog({
+                kind: "select",
+                title: "Reconcile LinkedIn publish outcome",
+                message: rateLimited
+                  ? "Wait for LinkedIn's Retry-After period and verify that no post was created before authorizing a retry."
+                  : "Choose only the outcome you verified directly in LinkedIn.",
+                options: rateLimited
+                  ? [{ label: "No post exists — authorize retry", value: "retry" }, { label: "Cancel", value: "cancel" }]
+                  : [{ label: "Post exists", value: "published" }, { label: "Verified no post exists", value: "not_published" }],
+                confirmLabel: "Continue",
+              });
+              if (outcome === null || outcome === "cancel") return;
+              const evidence = await openMessageDialog({
+                kind: "textarea",
+                title: "Record verification evidence",
+                message: "Summarize how you verified the outcome (20–500 characters). Never enter passwords, access tokens, or other credentials.",
+                required: true,
+                minLength: 20,
+                maxLength: 500,
+                confirmLabel: "Continue",
+              });
+              if (evidence === null) return;
               let payload: AnyRecord = { evidence_summary: evidence };
               if (rateLimited && outcome === "retry") {
                 payload.outcome = "retry_after_rate_limit";
                 payload.retry_confirmation = "I waited for Retry-After and confirmed no LinkedIn post was created";
               } else if (!rateLimited && outcome === "published") {
-                const providerPostId = window.prompt("Enter the confirmed LinkedIn post URN (urn:li:share:... or urn:li:ugcPost:...).");
-                if (!providerPostId) return;
+                const providerPostId = await openMessageDialog({
+                  kind: "text",
+                  title: "Enter the confirmed LinkedIn post ID",
+                  message: "Enter the post URN shown by LinkedIn (urn:li:share:… or urn:li:ugcPost:…).",
+                  placeholder: "urn:li:share:…",
+                  required: true,
+                  maxLength: 240,
+                  confirmLabel: "Record published post",
+                });
+                if (providerPostId === null) return;
                 payload.outcome = "confirmed_published";
                 payload.provider_post_id = providerPostId;
               } else if (!rateLimited && outcome === "not_published") {
-                if (!window.confirm("Confirm that you verified LinkedIn did not create this post. A retry may publish it.")) return;
+                const confirmed = await openMessageDialog({
+                  kind: "confirm",
+                  title: "Authorize a LinkedIn retry?",
+                  message: "You confirmed no post exists. Retrying may create a new live post; ensure your verification is accurate before continuing.",
+                  confirmLabel: "Authorize retry",
+                  tone: "danger",
+                });
+                if (confirmed === null) return;
                 payload.outcome = "confirmed_not_published";
                 payload.retry_confirmation = "I confirmed no LinkedIn post was created";
               } else {
@@ -551,14 +782,21 @@ export default function Home() {
                   ? "LinkedIn post recorded as published."
                   : `LinkedIn reconciliation saved with status ${result.status}.`);
             } else {
-              if (!row.account_is_mock && !window.confirm(
-                "This approved item will be sent to the connected LinkedIn account. Continue with the provider call?",
-              )) return;
+              if (!row.account_is_mock) {
+                const confirmed = await openMessageDialog({
+                  kind: "confirm",
+                  title: "Publish to LinkedIn now?",
+                  message: "This approved content will be sent to the connected LinkedIn account. The provider call can create a public post.",
+                  confirmLabel: "Publish now",
+                  tone: "danger",
+                });
+                if (confirmed === null) return;
+              }
               await request(`${base}/publish-jobs/${row.id}/dispatch`, { method: "POST" });
-              setNotice(`${row.platform === "linkedin" ? "LinkedIn" : "Mock provider"} confirmed the post.`);
+              setNotice(`${row.platform === "linkedin" ? "LinkedIn" : "Mock provider"} confirmed the post.`, "success");
             }
             await loadWorkspace();
-          } catch (error) { setNotice(error instanceof Error ? error.message : "Publishing action failed"); }
+          } catch (error) { setNotice(error instanceof Error ? error.message : "Publishing action failed", "error"); }
         }} />}
         {tab === "Analytics" && <>
           <div className="callout"><strong>Snapshot-based reporting.</strong> Data below is mock or manually imported, not a live provider sync. Check each metric definition and capture time; engagement rates and reach are not assumed comparable across platforms. Latest capture: {analyticsMeta?.freshness?.latest_snapshot_at ?? "none"}.</div>
@@ -578,7 +816,7 @@ export default function Home() {
               setAnalyticsQuery(query);
               setAnalyticsMeta(result);
               setData(result.snapshots);
-            } catch (error) { setNotice(error instanceof Error ? error.message : "Could not filter analytics"); }
+            } catch (error) { setNotice(error instanceof Error ? error.message : "Could not filter analytics", "error"); }
           }}>
             <h2>Filter reporting period and scope</h2>
             <label>From<input name="start" type="datetime-local" /></label>
@@ -611,10 +849,10 @@ export default function Home() {
                   source_note: values.source_note,
                 }),
               });
-              setNotice("Analytics snapshot saved.");
+              setNotice("Analytics snapshot saved.", "success");
               form.reset();
               await loadWorkspace();
-            } catch (error) { setNotice(error instanceof Error ? error.message : "Could not import analytics snapshot"); }
+            } catch (error) { setNotice(error instanceof Error ? error.message : "Could not import analytics snapshot", "error"); }
           }}>
             <h2>Record an analytics snapshot</h2>
             <label>Social account<select name="social_account_id" required>{accounts.map((account) => <option key={account.id} value={account.id}>{account.display_name} · {account.platform}{account.is_mock ? " · mock" : ""}</option>)}</select></label>
@@ -645,7 +883,7 @@ export default function Home() {
               link.download = "analytics.csv";
               link.click();
               URL.revokeObjectURL(url);
-            } catch (error) { setNotice(error instanceof Error ? error.message : "CSV export failed"); }
+            } catch (error) { setNotice(error instanceof Error ? error.message : "CSV export failed", "error"); }
           }}>Export CSV</button></div><RecordList rows={data} kind="analytics" /></div>
           <form className="panel form-grid" onSubmit={async (event) => {
             event.preventDefault();
@@ -668,10 +906,10 @@ export default function Home() {
                   next_action: values.next_action,
                 }),
               });
-              setNotice("Experiment log saved. Outcomes are observations, not guarantees.");
+              setNotice("Experiment log saved. Outcomes are observations, not guarantees.", "success");
               form.reset();
               await loadWorkspace();
-            } catch (error) { setNotice(error instanceof Error ? error.message : "Could not save experiment"); }
+            } catch (error) { setNotice(error instanceof Error ? error.message : "Could not save experiment", "error"); }
           }}>
             <h2>Experiment log</h2>
             <label>Name<input name="name" required maxLength={200} /></label>
@@ -708,10 +946,10 @@ export default function Home() {
                   received_at: new Date(String(values.received_at)).toISOString(),
                 }),
               });
-              setNotice("Community interaction imported.");
+              setNotice("Community interaction imported.", "success");
               form.reset();
               await loadWorkspace();
-            } catch (error) { setNotice(error instanceof Error ? error.message : "Could not import interaction"); }
+            } catch (error) { setNotice(error instanceof Error ? error.message : "Could not import interaction", "error"); }
           }}>
             <h2>Import an interaction</h2>
             <label>Social account<select name="social_account_id" required>{accounts.map((account) => <option key={account.id} value={account.id}>{account.display_name} · {account.platform}{account.is_mock ? " · mock" : ""}</option>)}</select></label>
@@ -726,12 +964,30 @@ export default function Home() {
           <RecordList rows={data} kind="community" onAction={async (row, action) => {
             try {
               if (action === "reply") {
-                const body = window.prompt("Draft a reply. This will not be sent externally.");
-                if (!body) return;
+                const body = await openMessageDialog({
+                  kind: "textarea",
+                  title: "Draft a community reply",
+                  message: "This creates a draft for human review. It will not be sent externally.",
+                  required: true,
+                  maxLength: 5000,
+                  confirmLabel: "Save draft",
+                });
+                if (body === null) return;
                 await request(`${base}/community/${row.id}/replies`, { method: "POST", body: JSON.stringify({ body }) });
               } else if (action === "assign") {
-                const value = window.prompt("Enter an active workspace member user ID, or leave blank to unassign.");
+                const value = await openMessageDialog({
+                  kind: "text",
+                  title: "Assign conversation",
+                  message: "Enter the user ID of an active workspace member. Leave blank to unassign.",
+                  placeholder: "Workspace member user ID",
+                  maxLength: 12,
+                  confirmLabel: "Save assignment",
+                });
                 if (value === null) return;
+                if (value.trim() && (!/^\d+$/.test(value.trim()) || Number(value) < 1)) {
+                  setNotice("Enter a valid positive workspace member ID.", "error");
+                  return;
+                }
                 await request(`${base}/community/${row.id}/assignment`, {
                   method: "PATCH",
                   body: JSON.stringify({ assigned_to: value.trim() ? Number(value) : null }),
@@ -750,9 +1006,9 @@ export default function Home() {
                   body: JSON.stringify({ decision, comment: "" }),
                 });
               }
-              setNotice("Community inbox updated. Approved replies remain drafts and are not sent.");
+              setNotice("Community inbox updated. Approved replies remain drafts and are not sent.", "success");
               await loadWorkspace();
-            } catch (error) { setNotice(error instanceof Error ? error.message : "Community action failed"); }
+            } catch (error) { setNotice(error instanceof Error ? error.message : "Community action failed", "error"); }
           }} />
         </>}
         {tab === "Team" && <><form className="panel form-grid" onSubmit={(event) => submit(event, `${base}/members`)}><h2>Add registered workspace member</h2><label>Email<input name="email" type="email" required /></label><label>Role<select name="role"><option>approver</option><option>creator</option><option>strategist</option><option>admin</option><option>analyst</option><option>viewer</option></select></label><p className="helper wide">The person must register first. Authors cannot approve their own content.</p><button className="primary">Add member</button></form><RecordList rows={data} kind="member" /></>}

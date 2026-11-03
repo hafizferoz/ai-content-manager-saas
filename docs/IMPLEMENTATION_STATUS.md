@@ -7,6 +7,11 @@ outstanding. Phase 4 now includes tenant-scoped analytics snapshots,
 experiment logging, and a mock/manual community inbox with reviewed
 reply drafts; provider analytics and community APIs are not enabled.
 
+**Cross-cutting UX:** Browser-native prompts and confirms have been
+replaced with styled application dialogs; browser-native validation
+bubbles are intercepted; notifications distinguish success,
+information, and errors.
+
 ## Repository assessment
 
 -   [x] Inspect current repository and stack (documentation-only starter)
