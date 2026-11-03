@@ -48,6 +48,7 @@ information, and errors.
 -   [x] Tenant-scoped agent run history, estimated token usage, platform previews
 -   [x] AI workflow tests for output validation, source scoping, errors, and usage
 -   [x] Mock/provider adapter contract tests (HTTP mocked; no external credentials used)
+-   [x] Safe, status-specific provider failure guidance in workflow responses, including quota-versus-rate-limit classification; error codes persisted in agent-run history
 -   [x] Versioned five-workflow evaluation corpus and safe-by-default regression runner
 -   [ ] Run and review live-provider quality baselines for each supported deployment model
 

@@ -418,7 +418,7 @@ def execute_ai(db: Session, organization_id: int, user_id: int, agent_name: str,
         db.commit()
         raise HTTPException(
             status_code=502,
-            detail=f"AI workflow failed ({error.code}); run {error.run.id} is available in Agent Activity.",
+            detail=f"AI workflow failed: {str(error)} (code: {error.code}); run {error.run.id} is available in Agent Activity.",
         ) from error
 
 
@@ -1928,7 +1928,7 @@ def create_research(workspace_id: int, payload: ResearchRequest, user: User = De
         db.commit()
         raise HTTPException(
             status_code=502,
-            detail=f"Research workflow failed ({error.code}); run {error.run.id} is available in Agent Activity.",
+            detail=f"Research workflow failed: {str(error)} (code: {error.code}); run {error.run.id} is available in Agent Activity.",
         ) from error
     record.status = "completed"
     record.agent_run_id = run.id

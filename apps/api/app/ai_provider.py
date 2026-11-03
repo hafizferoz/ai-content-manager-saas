@@ -192,7 +192,11 @@ class OpenAICompatibleProvider:
         except httpx.RequestError as error:
             raise AIProviderError("provider_unavailable", "The configured AI provider could not be reached.") from error
         if response.is_error:
-            raise AIProviderError("provider_rejected_request", "The configured AI provider rejected the request.")
+            code, message = _provider_rejection(
+                response.status_code,
+                _known_provider_error_code(response) if response.status_code == 429 else None,
+            )
+            raise AIProviderError(code, message)
         try:
             payload = response.json()
             content = payload["choices"][0]["message"]["content"]
@@ -213,6 +217,77 @@ class OpenAICompatibleProvider:
             output_tokens=output_tokens,
             usage_is_estimated=not bool(input_tokens and output_tokens),
         )
+
+
+def _known_provider_error_code(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
+        return None
+    error = payload["error"]
+    for field in ("code", "type"):
+        if error.get(field) in ("insufficient_quota", "rate_limit_exceeded", "rate_limit_error"):
+            return error[field]
+    return None
+
+
+def _provider_rejection(status_code: int, provider_error_code: str | None = None) -> tuple[str, str]:
+    if status_code == 400 or status_code == 422:
+        return (
+            "provider_invalid_request",
+            "The AI provider rejected the request format or model parameters. Check that the selected model supports chat completions and JSON mode.",
+        )
+    if status_code == 401:
+        return (
+            "provider_authentication_failed",
+            "The AI provider rejected its configured API key. Verify the key is active and belongs to the configured provider.",
+        )
+    if status_code == 403:
+        return (
+            "provider_access_denied",
+            "The AI provider denied access to the configured model or account. Check model access and project permissions.",
+        )
+    if status_code == 404:
+        return (
+            "provider_endpoint_or_model_not_found",
+            "The AI provider endpoint or model was not found. Check the configured base URL and model identifier.",
+        )
+    if status_code == 408 or status_code == 504:
+        return (
+            "provider_timeout",
+            "The AI provider timed out. Try again later.",
+        )
+    if status_code == 413:
+        return (
+            "provider_context_limit_exceeded",
+            "The AI provider rejected the request because it exceeded a request or context limit. Shorten the brief or reduce supplied research.",
+        )
+    if status_code == 429:
+        if provider_error_code == "insufficient_quota":
+            return (
+                "provider_quota_exceeded",
+                "The AI provider reports that the account has insufficient quota. Check billing, available credits, and project spending limits.",
+            )
+        if provider_error_code in ("rate_limit_exceeded", "rate_limit_error"):
+            return (
+                "provider_rate_limited",
+                "The AI provider rate limit was reached. Wait before retrying or reduce request frequency.",
+            )
+        return (
+            "provider_rate_limited",
+            "The AI provider rate-limited the request or the account has insufficient quota. Check provider usage and retry after the limit resets.",
+        )
+    if status_code in (500, 502, 503):
+        return (
+            "provider_service_unavailable",
+            "The AI provider is temporarily unavailable. Try again later.",
+        )
+    return (
+        "provider_rejected_request",
+        f"The AI provider rejected the request (HTTP {status_code}). Check provider configuration and account status.",
+    )
 
 
 def create_provider() -> StructuredProvider:

@@ -1,7 +1,14 @@
 import httpx
 import pytest
 
-from app.ai_provider import AIProviderError, MockProvider, OpenAICompatibleProvider, create_provider
+from app.ai_provider import (
+    AIProviderError,
+    MockProvider,
+    OpenAICompatibleProvider,
+    _known_provider_error_code,
+    _provider_rejection,
+    create_provider,
+)
 
 
 def test_mock_provider_returns_structured_research_and_estimated_usage():
@@ -71,8 +78,62 @@ def test_provider_errors_do_not_expose_provider_response_body(monkeypatch):
     with pytest.raises(AIProviderError) as error:
         provider.generate("agent", "prompt", {})
 
-    assert error.value.code == "provider_rejected_request"
+    assert error.value.code == "provider_authentication_failed"
+    assert "API key" in str(error.value)
     assert "secret provider details" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("provider_code", "expected_code", "message_fragment"),
+    [
+        ("insufficient_quota", "provider_quota_exceeded", "billing"),
+        ("rate_limit_exceeded", "provider_rate_limited", "Wait before retrying"),
+        ("rate_limit_error", "provider_rate_limited", "Wait before retrying"),
+    ],
+)
+def test_provider_429_errors_are_safely_classified(provider_code, expected_code, message_fragment):
+    sensitive_detail = "internal provider detail"
+    response = httpx.Response(
+        429,
+        json={"error": {"code": provider_code, "message": sensitive_detail}},
+    )
+
+    safe_code = _known_provider_error_code(response)
+    code, message = _provider_rejection(response.status_code, safe_code)
+
+    assert code == expected_code
+    assert message_fragment in message
+    assert sensitive_detail not in message
+
+
+def test_unknown_provider_429_details_are_not_retained():
+    response = httpx.Response(
+        429,
+        json={"error": {"code": "unknown", "message": "sensitive provider detail"}},
+    )
+
+    assert _known_provider_error_code(response) is None
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_code"),
+    [
+        (400, "provider_invalid_request"),
+        (403, "provider_access_denied"),
+        (404, "provider_endpoint_or_model_not_found"),
+        (408, "provider_timeout"),
+        (413, "provider_context_limit_exceeded"),
+        (429, "provider_rate_limited"),
+        (503, "provider_service_unavailable"),
+        (418, "provider_rejected_request"),
+    ],
+)
+def test_provider_rejection_status_maps_to_safe_actionable_error(status_code, expected_code):
+    code, message = _provider_rejection(status_code)
+
+    assert code == expected_code
+    assert message
+    assert str(status_code) not in message or status_code == 418
 
 
 def test_provider_factory_defaults_to_mock(monkeypatch):
