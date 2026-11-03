@@ -5,6 +5,18 @@ import { FormEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect,
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 type AnyRecord = Record<string, any>;
 type Workspace = { id: number; name: string; role: string };
+type AIProviderSetting = {
+  provider: string;
+  name: string;
+  model: string;
+  apiKeyInput: string;
+  showApiKey: boolean;
+  apiKeyConfigured: boolean;
+  enabled: boolean;
+  priority: number;
+  models: string[];
+  status: string;
+};
 type NoticeTone = "error" | "info" | "success";
 type MessageDialogOptions = {
   kind: "confirm" | "text" | "textarea" | "select";
@@ -25,7 +37,7 @@ type MessageDialogState = MessageDialogOptions & {
   error: string;
   resolve: (value: string | null) => void;
 };
-const tabs = ["Overview", "Brand", "Campaigns", "Research", "AI Studio", "Content", "Approvals", "Accounts", "Publishing", "Analytics", "Community", "Agent Activity", "Usage", "Team", "Audit"];
+const tabs = ["Overview", "Brand", "Campaigns", "Research", "AI Studio", "AI Providers", "Content", "Approvals", "Accounts", "Publishing", "Analytics", "Community", "Agent Activity", "Usage", "Team", "Audit"];
 
 export default function Home() {
   const [token, setToken] = useState("");
@@ -37,6 +49,7 @@ export default function Home() {
   const [data, setData] = useState<AnyRecord[]>([]);
   const [brand, setBrand] = useState<AnyRecord>({ name: "", value_proposition: "", audience: "", tone: "", preferred_vocabulary: [], prohibited_claims: [] });
   const [usage, setUsage] = useState<AnyRecord | null>(null);
+  const [aiProviders, setAIProviders] = useState<AIProviderSetting[]>([]);
   const [aiResult, setAiResult] = useState<AnyRecord | null>(null);
   const [preview, setPreview] = useState<AnyRecord | null>(null);
   const [analyticsMeta, setAnalyticsMeta] = useState<AnyRecord | null>(null);
@@ -163,7 +176,28 @@ export default function Home() {
         Audit: `/api/v1/workspaces/${workspace.id}/audit-logs`,
       };
       if (tab === "Brand") setBrand(await request(`/api/v1/workspaces/${workspace.id}/brand`));
-      if (tab === "Usage") {
+      if (tab === "AI Providers") {
+        const result = await request(`/api/v1/workspaces/${workspace.id}/ai/providers`);
+        const configured = new Map<string, AnyRecord>(
+          result.configurations.map((item: AnyRecord) => [item.provider, item]),
+        );
+        setAIProviders(result.providers.map((provider: AnyRecord, index: number) => {
+          const saved = configured.get(provider.id);
+          return {
+            provider: provider.id,
+            name: provider.name,
+            model: saved?.model ?? "",
+            apiKeyInput: "",
+            showApiKey: false,
+            apiKeyConfigured: saved?.api_key_configured ?? false,
+            enabled: saved?.enabled ?? false,
+            priority: saved?.priority ?? index,
+            models: [],
+            status: saved ? "Saved · not tested" : "Not configured",
+          };
+        }));
+        setData([]);
+      } else if (tab === "Usage") {
         setUsage(await request(`/api/v1/workspaces/${workspace.id}/usage`));
         setData([]);
       } else if (tab === "Analytics") {
@@ -255,6 +289,101 @@ export default function Home() {
       await loadWorkspace();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "AI workflow failed", "error");
+    }
+  }
+
+  function updateAIProvider(provider: string, changes: Partial<AIProviderSetting>) {
+    setAIProviders((current) => current.map((item) =>
+      item.provider === provider ? { ...item, ...changes } : item,
+    ));
+  }
+
+  async function saveAIProvider(event: FormEvent<HTMLFormElement>, setting: AIProviderSetting) {
+    event.preventDefault();
+    try {
+      const saved = await request(
+        `/api/v1/workspaces/${workspace?.id}/ai/providers/${setting.provider}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            ...(setting.apiKeyInput.trim() ? { api_key: setting.apiKeyInput.trim() } : {}),
+            model: setting.model,
+            enabled: setting.enabled,
+            priority: setting.priority,
+          }),
+        },
+      );
+      updateAIProvider(setting.provider, {
+        apiKeyInput: "",
+        showApiKey: false,
+        apiKeyConfigured: saved.api_key_configured,
+        status: "Saved · not tested",
+      });
+      setNotice(`${setting.name} configuration saved.`, "success");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save provider configuration", "error");
+    }
+  }
+
+  async function discoverAIProviderModels(setting: AIProviderSetting) {
+    try {
+      const result = await request(
+        `/api/v1/workspaces/${workspace?.id}/ai/providers/${setting.provider}/models`,
+      );
+      updateAIProvider(setting.provider, {
+        models: result.models,
+        status: `Discovered ${result.models.length} models`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not list provider models";
+      updateAIProvider(setting.provider, { status: message });
+      setNotice(message, "error");
+    }
+  }
+
+  async function validateAIProvider(setting: AIProviderSetting) {
+    try {
+      const result = await request(
+        `/api/v1/workspaces/${workspace?.id}/ai/providers/${setting.provider}/validate`,
+        { method: "POST" },
+      );
+      updateAIProvider(setting.provider, {
+        status: result.configured_model_available
+          ? "Connection valid · model available"
+          : "Connection valid · configured model not found in model list",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Provider validation failed";
+      updateAIProvider(setting.provider, { status: message });
+      setNotice(message, "error");
+    }
+  }
+
+  async function removeAIProvider(setting: AIProviderSetting) {
+    const confirmed = await openMessageDialog({
+      kind: "confirm",
+      title: `Remove ${setting.name}?`,
+      message: "This removes the saved workspace credential and disables this provider. Existing generated drafts and usage history are unchanged.",
+      confirmLabel: "Remove provider",
+      tone: "danger",
+    });
+    if (confirmed === null) return;
+    try {
+      await request(`/api/v1/workspaces/${workspace?.id}/ai/providers/${setting.provider}`, {
+        method: "DELETE",
+      });
+      updateAIProvider(setting.provider, {
+        model: "",
+        apiKeyInput: "",
+        showApiKey: false,
+        apiKeyConfigured: false,
+        enabled: false,
+        models: [],
+        status: "Not configured",
+      });
+      setNotice(`${setting.name} configuration removed.`, "success");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not remove provider configuration", "error");
     }
   }
 
@@ -578,7 +707,7 @@ export default function Home() {
           <p className="helper wide">Mock mode does not fetch URLs. Add excerpts you have permission to use; source text is treated as untrusted data and never as instructions.</p>
         </form><RecordList rows={data} kind="research" /></>}
         {tab === "AI Studio" && <div className="ai-studio">
-          <div className="callout"><strong>AI provider:</strong> Mock by default. Configure a trusted OpenAI-compatible provider on the server to send workflow inputs to that provider. Generated content remains a draft and still requires quality checks and human approval.</div>
+          <div className="callout"><strong>AI provider:</strong> Workspace provider settings and model order are managed in AI Providers. Generated content remains a draft and still requires quality checks and human approval.</div>
           <form className="panel form-grid" onSubmit={(event) => {
             event.preventDefault();
             const values = Object.fromEntries(new FormData(event.currentTarget).entries());
@@ -623,6 +752,81 @@ export default function Home() {
             <button className="primary">Generate concepts</button>
           </form>
           {aiResult && <pre className="panel output-json">{JSON.stringify(aiResult, null, 2)}</pre>}
+        </div>}
+        {tab === "AI Providers" && <div className="ai-provider-settings">
+          <div className="callout">
+            Workspace owners and admins can configure provider keys. Keys are encrypted by the API and never returned to the browser. Order providers by priority (0 is primary); fallback is limited to temporary provider failures.
+          </div>
+          {!["owner", "admin"].includes(workspace.role) && <div className="callout">Your workspace role can view provider status but cannot change AI credentials or settings.</div>}
+          <div className="provider-grid">
+            {aiProviders.map((setting) => <form
+              className="panel provider-card"
+              key={setting.provider}
+              onSubmit={(event) => void saveAIProvider(event, setting)}
+            >
+              <div className="panel-heading">
+                <div><h2>{setting.name}</h2><p className="helper">{setting.apiKeyConfigured ? "Credential configured · hidden" : "No workspace credential saved"}</p></div>
+                <span className={`status ${setting.enabled ? "approved" : ""}`}>{setting.enabled ? "Enabled" : "Disabled"}</span>
+              </div>
+              <label>API key
+                <span className="provider-key-field">
+                  <input
+                    type={setting.showApiKey ? "text" : "password"}
+                    autoComplete="new-password"
+                    disabled={!["owner", "admin"].includes(workspace.role)}
+                    value={setting.apiKeyInput}
+                    onChange={(event) => updateAIProvider(setting.provider, { apiKeyInput: event.target.value })}
+                    placeholder={setting.apiKeyConfigured ? "Leave blank to keep saved key" : "Enter provider API key"}
+                    aria-label={`${setting.name} API key`}
+                  />
+                  <button className="secondary" type="button" disabled={!["owner", "admin"].includes(workspace.role)} onClick={() => updateAIProvider(setting.provider, { showApiKey: !setting.showApiKey })}>
+                    {setting.showApiKey ? "Hide" : "Show"}
+                  </button>
+                </span>
+              </label>
+              <label>Preferred model
+                <input
+                  value={setting.model}
+                  disabled={!["owner", "admin"].includes(workspace.role)}
+                  onChange={(event) => updateAIProvider(setting.provider, { model: event.target.value })}
+                  list={`ai-models-${setting.provider}`}
+                  required
+                  maxLength={200}
+                />
+                <datalist id={`ai-models-${setting.provider}`}>
+                  {setting.models.map((model) => <option key={model} value={model} />)}
+                </datalist>
+              </label>
+              <div className="provider-controls">
+                <label>Fallback priority (0 = primary)
+                  <input
+                    type="number"
+                    min={0}
+                    max={20}
+                    disabled={!["owner", "admin"].includes(workspace.role)}
+                    value={setting.priority}
+                    onChange={(event) => updateAIProvider(setting.provider, { priority: Number(event.target.value) })}
+                  />
+                </label>
+                <label className="provider-enabled">
+                  <input
+                    type="checkbox"
+                    checked={setting.enabled}
+                    disabled={!["owner", "admin"].includes(workspace.role)}
+                    onChange={(event) => updateAIProvider(setting.provider, { enabled: event.target.checked })}
+                  />
+                  Enable for AI workflows
+                </label>
+              </div>
+              <p className="helper provider-status" role="status">{setting.status}</p>
+              <div className="provider-actions">
+                <button className="primary" type="submit" disabled={!["owner", "admin"].includes(workspace.role)}>Save provider</button>
+                <button className="secondary" type="button" disabled={!setting.apiKeyConfigured || !["owner", "admin"].includes(workspace.role)} onClick={() => void validateAIProvider(setting)}>Test connection</button>
+                <button className="secondary" type="button" disabled={!setting.apiKeyConfigured || !["owner", "admin"].includes(workspace.role)} onClick={() => void discoverAIProviderModels(setting)}>Discover models</button>
+                {setting.apiKeyConfigured && <button className="danger" type="button" disabled={!["owner", "admin"].includes(workspace.role)} onClick={() => void removeAIProvider(setting)}>Remove</button>}
+              </div>
+            </form>)}
+          </div>
         </div>}
         {tab === "Content" && <>{contentForm}<RecordList rows={data} kind="content" onAction={async (row, action) => {
           try {
@@ -693,7 +897,39 @@ export default function Home() {
           } catch (error) { setNotice(error instanceof Error ? error.message : "Decision failed", "error"); }
         }} />}
         {tab === "Agent Activity" && <RecordList rows={data} kind="agent" emptyText="Completed and failed AI runs will appear here with provider, model, timing, outputs, and usage." />}
-        {tab === "Usage" && <div className="metric-grid"><Metric label="AI runs with usage" value={usage?.event_count ?? 0} /><Metric label="Input tokens" value={usage?.input_tokens ?? 0} /><Metric label="Output tokens" value={usage?.output_tokens ?? 0} /><Metric label="Estimated token records" value={usage?.estimated_events ?? 0} />{usage && <div className="callout wide">{usage.cost_note}</div>}</div>}
+        {tab === "Usage" && <>
+          <div className="metric-grid">
+            <Metric label="AI requests" value={usage?.event_count ?? 0} />
+            <Metric label="Successful requests" value={usage?.successful_requests ?? 0} />
+            <Metric label="Failed requests" value={usage?.failed_requests ?? 0} />
+            <Metric label="Fallback requests" value={usage?.fallback_requests ?? 0} />
+            <Metric label="Input tokens" value={usage?.input_tokens ?? 0} />
+            <Metric label="Output tokens" value={usage?.output_tokens ?? 0} />
+            <Metric label="Estimated token records" value={usage?.estimated_events ?? 0} />
+            <Metric label="Known cost (USD)" value={usage?.known_cost_usd ?? 0} />
+            {usage && <div className="callout wide">{usage.cost_note}</div>}
+          </div>
+          {usage && usage.by_provider?.length > 0 && <section className="panel">
+            <h2>Usage by provider</h2>
+            <div className="record-list">{usage.by_provider.map((provider: AnyRecord) => <article className="record" key={provider.provider}>
+              <div className="record-main"><strong>{provider.provider}</strong><p>{provider.requests} requests · {provider.input_tokens} input / {provider.output_tokens} output tokens</p></div>
+              <span className="status">{provider.failed_requests} failed · {provider.fallback_requests} fallback</span>
+            </article>)}</div>
+          </section>}
+          {usage && usage.events?.length > 0 && <section className="panel">
+            <h2>Recent AI requests</h2>
+            <div className="record-list">{usage.events.map((event: AnyRecord) => <article className="record" key={event.id}>
+              <div className="record-main">
+                <strong>{event.task_type || "AI workflow"} · {event.provider} / {event.model}</strong>
+                <p>{event.created_at ? new Date(event.created_at).toLocaleString() : "Timestamp unavailable"} · {event.input_tokens} input / {event.output_tokens} output tokens · {event.duration_ms} ms</p>
+                <small>{event.usage_available ? (event.is_estimated ? "Estimated token usage" : "Provider-reported token usage") : "Token usage unavailable"}</small>
+              </div>
+              <span className={`status ${event.status === "succeeded" ? "approved" : "rejected"}`}>
+                {event.status}{event.fallback_used ? " · fallback used" : ""}{event.error_category ? ` · ${event.error_category}` : ""}
+              </span>
+            </article>)}</div>
+          </section>}
+        </>}
         {tab === "Accounts" && <><div className="callout"><strong>LinkedIn integration:</strong> connect via official OAuth. Publishing is enabled only when LinkedIn grants w_member_social; only approved text-only member posts are supported. Other platforms remain mock-only.</div><div className="panel"><button className="primary" onClick={async () => {
           try {
             const result = await request(`${base}/integrations/linkedin/connect`, { method: "POST" });

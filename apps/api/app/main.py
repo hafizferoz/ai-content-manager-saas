@@ -27,9 +27,11 @@ from app.ai_schemas import (
     ReviewOutput,
     StrategyOutput,
 )
+from app.ai_credentials import decrypt_api_key, encrypt_api_key
+from app.ai_provider import AIProviderError, create_named_provider
 from app.ai_workflows import WorkflowExecutionError, execute_workflow
 from app.models import (
-    AgentRun, AnalyticsSnapshot, Approval, AuditLog, BrandProfile, Campaign, CampaignStrategy, CommunityMessage,
+    AIProviderConfiguration, AgentRun, AnalyticsSnapshot, Approval, AuditLog, BrandProfile, Campaign, CampaignStrategy, CommunityMessage,
     CommunityReply, ContentItem, ContentVersion, Experiment,
     LinkedInCredential, Membership, OAuthState, Organization, PublishJob, QualityReview,
     ResearchRecord, ResearchSource, SessionToken, SocialAccount, SocialAccountCapability,
@@ -80,6 +82,13 @@ ANALYTICS_METRICS = {
     "followers_gained": {"label": "Followers gained", "unit": "count", "aggregation": "not_comparable", "definition": "Provider-reported follower change; attribution to an individual post may not be available."},
 }
 
+AI_PROVIDER_CATALOG = [
+    {"id": "gemini", "name": "Google Gemini", "model_discovery": True},
+    {"id": "groq", "name": "Groq", "model_discovery": True},
+    {"id": "openrouter", "name": "OpenRouter", "model_discovery": True},
+    {"id": "mistral", "name": "Mistral AI", "model_discovery": True},
+    {"id": "openai", "name": "OpenAI", "model_discovery": True},
+]
 
 class RegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
@@ -91,6 +100,21 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+
+class AIProviderConfigurationRequest(BaseModel):
+    api_key: str | None = Field(default=None, max_length=8192)
+    model: str = Field(min_length=1, max_length=200)
+    enabled: bool = True
+    priority: int = Field(default=0, ge=0, le=20)
+
+    @field_validator("model")
+    @classmethod
+    def trim_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("A model identifier is required")
+        return normalized
 
 
 class BrandRequest(BaseModel):
@@ -2217,12 +2241,183 @@ def get_ai_usage(workspace_id: int, user: User = Depends(current_user),
     events = db.scalars(select(UsageEvent).where(
         UsageEvent.organization_id == workspace_id
     ).order_by(UsageEvent.id.desc()).limit(1000)).all()
+    providers: dict[str, dict[str, Any]] = {}
+    daily: dict[str, dict[str, int]] = {}
+    for event in events:
+        provider_summary = providers.setdefault(event.provider, {
+            "provider": event.provider,
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "failed_requests": 0,
+            "fallback_requests": 0,
+        })
+        provider_summary["requests"] += 1
+        provider_summary["input_tokens"] += event.input_tokens
+        provider_summary["output_tokens"] += event.output_tokens
+        provider_summary["failed_requests"] += int(event.status == "failed")
+        provider_summary["fallback_requests"] += int(event.fallback_used)
+        day = event.created_at.date().isoformat()
+        daily_summary = daily.setdefault(day, {
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "failed_requests": 0,
+            "fallback_requests": 0,
+        })
+        daily_summary["requests"] += 1
+        daily_summary["input_tokens"] += event.input_tokens
+        daily_summary["output_tokens"] += event.output_tokens
+        daily_summary["failed_requests"] += int(event.status == "failed")
+        daily_summary["fallback_requests"] += int(event.fallback_used)
     return {
         "event_count": len(events),
+        "successful_requests": sum(event.status == "succeeded" for event in events),
+        "failed_requests": sum(event.status == "failed" for event in events),
+        "fallback_requests": sum(event.fallback_used for event in events),
         "input_tokens": sum(event.input_tokens for event in events),
         "output_tokens": sum(event.output_tokens for event in events),
         "estimated_events": sum(1 for event in events if event.is_estimated),
         "known_cost_usd": round(sum(event.cost_usd or 0 for event in events), 6),
         "cost_note": "Provider cost is unknown unless the provider supplies billing data; local mock token counts are estimates.",
+        "by_provider": sorted(providers.values(), key=lambda summary: summary["provider"]),
+        "daily": [{"date": date, **values} for date, values in sorted(daily.items())],
         "events": [as_dict(event) for event in events],
+    }
+
+
+def _saved_ai_provider(db: Session, workspace_id: int, provider_name: str):
+    configuration = db.scalar(select(AIProviderConfiguration).where(
+        AIProviderConfiguration.organization_id == workspace_id,
+        AIProviderConfiguration.provider == provider_name,
+    ))
+    if configuration is None:
+        raise HTTPException(status_code=404, detail="AI provider is not configured for this workspace")
+    try:
+        provider = create_named_provider(
+            configuration.provider,
+            decrypt_api_key(configuration.api_key_ciphertext),
+            configuration.model,
+        )
+    except AIProviderError as error:
+        raise HTTPException(status_code=503, detail=f"{error} (code: {error.code})") from error
+    return configuration, provider
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/ai/providers")
+def list_ai_providers(workspace_id: int, user: User = Depends(current_user),
+                      db: Session = Depends(get_db)) -> dict:
+    workspace_member(db, user, workspace_id)
+    configurations = db.scalars(select(AIProviderConfiguration).where(
+        AIProviderConfiguration.organization_id == workspace_id
+    ).order_by(AIProviderConfiguration.priority, AIProviderConfiguration.id)).all()
+    enabled = next((item.provider for item in configurations if item.enabled), None)
+    if enabled is None:
+        enabled = os.getenv("LLM_PROVIDER", "mock").strip().lower()
+    return {
+        "providers": AI_PROVIDER_CATALOG,
+        "primary_provider": enabled,
+        "configurations": [{
+            "provider": item.provider,
+            "model": item.model,
+            "enabled": item.enabled,
+            "priority": item.priority,
+            "api_key_configured": bool(item.api_key_ciphertext),
+        } for item in configurations],
+    }
+
+
+@app.put("/api/v1/workspaces/{workspace_id}/ai/providers/{provider_name}")
+def configure_ai_provider(workspace_id: int, provider_name: str, payload: AIProviderConfigurationRequest,
+                          user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin")
+    supported = {item["id"] for item in AI_PROVIDER_CATALOG}
+    if provider_name not in supported:
+        raise HTTPException(status_code=404, detail="AI provider is not supported")
+    configuration = db.scalar(select(AIProviderConfiguration).where(
+        AIProviderConfiguration.organization_id == workspace_id,
+        AIProviderConfiguration.provider == provider_name,
+    ))
+    submitted_key = (payload.api_key or "").strip()
+    if configuration is None and not submitted_key:
+        raise HTTPException(status_code=422, detail="An API key is required when configuring a provider")
+    if configuration is None:
+        configuration = AIProviderConfiguration(
+            organization_id=workspace_id,
+            provider=provider_name,
+            api_key_ciphertext="",
+            model=payload.model.strip(),
+            enabled=payload.enabled,
+            priority=payload.priority,
+            configured_by=user.id,
+        )
+        db.add(configuration)
+    if submitted_key:
+        try:
+            configuration.api_key_ciphertext = encrypt_api_key(submitted_key)
+        except AIProviderError as error:
+            raise HTTPException(status_code=503, detail=f"{error} (code: {error.code})") from error
+    configuration.model = payload.model.strip()
+    configuration.enabled = payload.enabled
+    configuration.priority = payload.priority
+    configuration.configured_by = user.id
+    audit(db, workspace_id, user.id, "ai.provider_configured", "ai_provider", provider_name,
+          {"provider": provider_name, "enabled": payload.enabled, "priority": payload.priority})
+    db.commit()
+    return {
+        "provider": configuration.provider,
+        "model": configuration.model,
+        "enabled": configuration.enabled,
+        "priority": configuration.priority,
+        "api_key_configured": bool(configuration.api_key_ciphertext),
+    }
+
+
+@app.delete("/api/v1/workspaces/{workspace_id}/ai/providers/{provider_name}", status_code=204)
+def delete_ai_provider(workspace_id: int, provider_name: str, user: User = Depends(current_user),
+                       db: Session = Depends(get_db)) -> Response:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin")
+    configuration = db.scalar(select(AIProviderConfiguration).where(
+        AIProviderConfiguration.organization_id == workspace_id,
+        AIProviderConfiguration.provider == provider_name,
+    ))
+    if configuration is None:
+        raise HTTPException(status_code=404, detail="AI provider is not configured for this workspace")
+    db.delete(configuration)
+    audit(db, workspace_id, user.id, "ai.provider_removed", "ai_provider", provider_name,
+          {"provider": provider_name})
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/ai/providers/{provider_name}/models")
+def list_configured_ai_models(workspace_id: int, provider_name: str, user: User = Depends(current_user),
+                              db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin")
+    _, provider = _saved_ai_provider(db, workspace_id, provider_name)
+    try:
+        return {"provider": provider_name, "models": provider.list_models()}
+    except AIProviderError as error:
+        raise HTTPException(status_code=502, detail=f"{error} (code: {error.code})") from error
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/ai/providers/{provider_name}/validate")
+def validate_ai_provider(workspace_id: int, provider_name: str, user: User = Depends(current_user),
+                         db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin")
+    configuration, provider = _saved_ai_provider(db, workspace_id, provider_name)
+    try:
+        models = provider.list_models()
+    except AIProviderError as error:
+        raise HTTPException(status_code=502, detail=f"{error} (code: {error.code})") from error
+    return {
+        "status": "valid",
+        "provider": provider_name,
+        "configured_model": configuration.model,
+        "configured_model_available": configuration.model in models,
+        "available_model_count": len(models),
     }

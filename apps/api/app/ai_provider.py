@@ -8,9 +8,10 @@ import httpx
 
 
 class AIProviderError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, provider_attempts: list[dict[str, str]] | None = None):
         super().__init__(message)
         self.code = code
+        self.provider_attempts = provider_attempts or []
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,12 @@ class StructuredProvider(Protocol):
     model: str
 
     def generate(self, agent_name: str, system_prompt: str, input_data: dict[str, Any]) -> Generation:
+        ...
+
+    def list_models(self) -> list[str]:
+        ...
+
+    def validate_api_key(self) -> bool:
         ...
 
 
@@ -156,11 +163,22 @@ class MockProvider:
             usage_is_estimated=True,
         )
 
+    def list_models(self) -> list[str]:
+        return [self.model]
+
+    def validate_api_key(self) -> bool:
+        return True
+
 
 class OpenAICompatibleProvider:
-    name = "openai-compatible"
-
-    def __init__(self, api_key: str, model: str, base_url: str):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str,
+        provider_name: str = "openai-compatible",
+        headers: dict[str, str] | None = None,
+    ):
         parsed = urlparse(base_url)
         if parsed.scheme not in ("https", "http") or not parsed.netloc or parsed.username or parsed.password:
             raise AIProviderError("invalid_provider_configuration", "The configured AI provider URL is invalid.")
@@ -168,13 +186,16 @@ class OpenAICompatibleProvider:
             raise AIProviderError("invalid_provider_configuration", "Remote AI provider URLs must use HTTPS.")
         self.api_key = api_key
         self.model = model
-        self.url = base_url.rstrip("/") + "/chat/completions"
+        self.name = provider_name
+        self.base_url = base_url.rstrip("/")
+        self.url = self.base_url + "/chat/completions"
+        self.headers = {"Authorization": f"Bearer {api_key}", **(headers or {})}
 
     def generate(self, agent_name: str, system_prompt: str, input_data: dict[str, Any]) -> Generation:
         try:
             response = httpx.post(
                 self.url,
-                headers={"Authorization": f"Bearer {self.api_key}"},
+                headers=self.headers,
                 json={
                     "model": self.model,
                     "messages": [
@@ -218,6 +239,162 @@ class OpenAICompatibleProvider:
             usage_is_estimated=not bool(input_tokens and output_tokens),
         )
 
+    def list_models(self) -> list[str]:
+        try:
+            response = httpx.get(
+                self.base_url + "/models",
+                headers=self.headers,
+                timeout=httpx.Timeout(15.0, connect=5.0),
+            )
+        except httpx.TimeoutException as error:
+            raise AIProviderError("provider_timeout", "The AI provider timed out.") from error
+        except httpx.RequestError as error:
+            raise AIProviderError("provider_unavailable", "The AI provider could not be reached.") from error
+        if response.is_error:
+            code, message = _provider_rejection(
+                response.status_code,
+                _known_provider_error_code(response) if response.status_code == 429 else None,
+            )
+            raise AIProviderError(code, message)
+        try:
+            payload = response.json()
+            return sorted({
+                entry["id"] for entry in payload["data"]
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            })
+        except (ValueError, KeyError, TypeError) as error:
+            raise AIProviderError("invalid_provider_response", "The AI provider returned an invalid model list.") from error
+
+    def validate_api_key(self) -> bool:
+        self.list_models()
+        return True
+
+
+class GeminiProvider:
+    name = "gemini"
+
+    def __init__(self, api_key: str, model: str):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        self.url = f"{self.base_url}/models/{model}:generateContent"
+
+    def generate(self, agent_name: str, system_prompt: str, input_data: dict[str, Any]) -> Generation:
+        try:
+            response = httpx.post(
+                self.url,
+                headers={"x-goog-api-key": self.api_key},
+                json={
+                    "systemInstruction": {"parts": [{"text": system_prompt}]},
+                    "contents": [{
+                        "role": "user",
+                        "parts": [{"text": json.dumps(input_data, ensure_ascii=False, default=str)}],
+                    }],
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "temperature": 0.3,
+                        "maxOutputTokens": 1800,
+                    },
+                },
+                timeout=httpx.Timeout(30.0, connect=5.0),
+            )
+        except httpx.TimeoutException as error:
+            raise AIProviderError("provider_timeout", "The configured AI provider timed out.") from error
+        except httpx.RequestError as error:
+            raise AIProviderError("provider_unavailable", "The configured AI provider could not be reached.") from error
+        if response.is_error:
+            code, message = _provider_rejection(
+                response.status_code,
+                _known_provider_error_code(response) if response.status_code == 429 else None,
+            )
+            raise AIProviderError(code, message)
+        try:
+            payload = response.json()
+            content = payload["candidates"][0]["content"]["parts"][0]["text"]
+            output = json.loads(content)
+            usage = payload.get("usageMetadata") or {}
+            input_tokens = int(usage.get("promptTokenCount") or 0)
+            output_tokens = int(usage.get("candidatesTokenCount") or 0)
+        except (ValueError, KeyError, IndexError, TypeError) as error:
+            raise AIProviderError("invalid_provider_response", "The configured AI provider returned an invalid response.") from error
+        return Generation(
+            output=output,
+            provider=self.name,
+            model=self.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            usage_is_estimated=not bool(input_tokens and output_tokens),
+        )
+
+    def list_models(self) -> list[str]:
+        try:
+            response = httpx.get(
+                self.base_url + "/models",
+                headers={"x-goog-api-key": self.api_key},
+                timeout=httpx.Timeout(15.0, connect=5.0),
+            )
+        except httpx.TimeoutException as error:
+            raise AIProviderError("provider_timeout", "The AI provider timed out.") from error
+        except httpx.RequestError as error:
+            raise AIProviderError("provider_unavailable", "The AI provider could not be reached.") from error
+        if response.is_error:
+            code, message = _provider_rejection(
+                response.status_code,
+                _known_provider_error_code(response) if response.status_code == 429 else None,
+            )
+            raise AIProviderError(code, message)
+        try:
+            payload = response.json()
+            return sorted({
+                entry["name"].removeprefix("models/")
+                for entry in payload["models"]
+                if isinstance(entry, dict)
+                and isinstance(entry.get("name"), str)
+                and "generateContent" in entry.get("supportedGenerationMethods", [])
+            })
+        except (ValueError, KeyError, TypeError) as error:
+            raise AIProviderError("invalid_provider_response", "The AI provider returned an invalid model list.") from error
+
+    def validate_api_key(self) -> bool:
+        self.list_models()
+        return True
+
+
+PROVIDER_ENDPOINTS = {
+    "groq": "https://api.groq.com/openai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "openai": "https://api.openai.com/v1",
+}
+
+
+def create_named_provider(
+    provider_name: str,
+    api_key: str,
+    model: str,
+    base_url: str | None = None,
+) -> StructuredProvider:
+    if not api_key or not model:
+        raise AIProviderError("incomplete_provider_configuration", "Configure an API key and model for the selected provider.")
+    if provider_name == "gemini":
+        return GeminiProvider(api_key, model)
+    if provider_name in PROVIDER_ENDPOINTS:
+        headers = {"HTTP-Referer": "https://ai-content-manager.local", "X-Title": "AI Content Manager"} if provider_name == "openrouter" else None
+        return OpenAICompatibleProvider(
+            api_key,
+            model,
+            base_url or PROVIDER_ENDPOINTS[provider_name],
+            provider_name=provider_name,
+            headers=headers,
+        )
+    if provider_name == "openai-compatible":
+        return OpenAICompatibleProvider(
+            api_key,
+            model,
+            base_url or "https://api.openai.com/v1",
+        )
+    raise AIProviderError("unsupported_provider", "The configured AI provider is not supported.")
+
 
 def _known_provider_error_code(response: httpx.Response) -> str | None:
     try:
@@ -227,7 +404,7 @@ def _known_provider_error_code(response: httpx.Response) -> str | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
         return None
     error = payload["error"]
-    for field in ("code", "type"):
+    for field in ("code", "type", "status"):
         if error.get(field) in ("insufficient_quota", "rate_limit_exceeded", "rate_limit_error"):
             return error[field]
     return None
@@ -264,6 +441,11 @@ def _provider_rejection(status_code: int, provider_error_code: str | None = None
             "provider_context_limit_exceeded",
             "The AI provider rejected the request because it exceeded a request or context limit. Shorten the brief or reduce supplied research.",
         )
+    if status_code == 402 or provider_error_code in ("insufficient_quota", "QUOTA_EXCEEDED"):
+        return (
+            "provider_quota_exceeded",
+            "The AI provider reports that the account has insufficient quota. Check billing, available credits, and project spending limits.",
+        )
     if status_code == 429:
         if provider_error_code == "insufficient_quota":
             return (
@@ -294,11 +476,10 @@ def create_provider() -> StructuredProvider:
     provider_name = os.getenv("LLM_PROVIDER", "mock").strip().lower()
     if provider_name == "mock":
         return MockProvider()
-    if provider_name == "openai-compatible":
-        api_key = os.getenv("LLM_API_KEY", "").strip()
-        model = os.getenv("LLM_MODEL", "").strip()
-        base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").strip()
-        if not api_key or not model:
-            raise AIProviderError("incomplete_provider_configuration", "Configure LLM_API_KEY and LLM_MODEL for the selected provider.")
-        return OpenAICompatibleProvider(api_key, model, base_url)
-    raise AIProviderError("unsupported_provider", "The configured AI provider is not supported.")
+    if provider_name not in {"openai-compatible", "gemini", "groq", "openrouter", "mistral", "openai"}:
+        raise AIProviderError("unsupported_provider", "The configured AI provider is not supported.")
+    prefix = provider_name.upper().replace("-", "_")
+    api_key = os.getenv(f"{prefix}_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip()
+    model = os.getenv(f"{prefix}_MODEL", "").strip() or os.getenv("LLM_MODEL", "").strip()
+    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").strip() if provider_name == "openai-compatible" else None
+    return create_named_provider(provider_name, api_key, model, base_url)
