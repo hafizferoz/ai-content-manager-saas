@@ -1,6 +1,6 @@
 # AI Content Manager SaaS
 
-A working Phase 1 foundation with a Phase 2 AI workflow slice for multi-tenant social content. The application includes an authenticated FastAPI API, a Next.js dashboard, PostgreSQL migrations, a database-backed publishing worker, an idempotent local mock social adapter, and structured research/strategy/drafting/review agents.
+A working Phase 1 foundation, Phase 2 AI workflows, and a Phase 3 capability-registry foundation for multi-tenant social content. The application includes an authenticated FastAPI API, a Next.js dashboard, PostgreSQL migrations, a database-backed publishing worker, an idempotent local mock social adapter, and structured research/strategy/drafting/review agents.
 
 ## What works today
 
@@ -14,6 +14,7 @@ A working Phase 1 foundation with a Phase 2 AI workflow slice for multi-tenant s
 - PostgreSQL/Redis/API/worker/web Docker Compose setup.
 - Source-linked research and structured Market Intelligence, Content Strategist, Cross-Platform Copywriter, Creative Director, and Quality/Brand Safety workflows.
 - Persisted campaign strategy history with source and agent-run traceability.
+- Tenant-scoped social capability registry and a mock-only adapter boundary; real provider connections remain disabled.
 - Tenant-scoped agent run history, token usage records, and approximate text-only platform previews.
 
 Real social network APIs, file uploads, calendar scheduling, analytics ingestion, and production identity-provider integration are not enabled. Mock AI is the default; an optional server-configured OpenAI-compatible LLM provider is supported. The mock social adapter never sends an external post.
