@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -14,10 +14,19 @@ from sqlalchemy.orm import Session
 from fastapi.security import HTTPAuthorizationCredentials
 
 from app.database import get_db
+from app.ai_schemas import (
+    CopyOutput,
+    CreativeOutput,
+    PlatformPreview,
+    ResearchOutput,
+    ReviewOutput,
+    StrategyOutput,
+)
+from app.ai_workflows import WorkflowExecutionError, execute_workflow
 from app.models import (
-    Approval, AuditLog, BrandProfile, Campaign, ContentItem, ContentVersion,
-    Membership, Organization, PublishJob, QualityReview, SessionToken,
-    SocialAccount, User,
+    AgentRun, Approval, AuditLog, BrandProfile, Campaign, ContentItem, ContentVersion,
+    Membership, Organization, PublishJob, QualityReview, ResearchRecord, ResearchSource,
+    SessionToken, SocialAccount, UsageEvent, User,
 )
 from app.domain import fingerprint_brand
 from app.publishing import dispatch_job
@@ -76,6 +85,48 @@ class ContentRequest(BaseModel):
     body: str = Field(min_length=1, max_length=3000)
     campaign_id: int | None = None
     media_manifest: list[dict[str, Any]] = Field(default_factory=list)
+    source_references: list[int] = Field(default_factory=list, max_length=30)
+
+
+class ResearchSourceInput(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+    url: AnyHttpUrl
+    source_type: str = Field(default="web", pattern="^(web|document|interview|internal)$")
+    excerpt: str = Field(min_length=1, max_length=6000)
+
+    @field_validator("url")
+    @classmethod
+    def reject_url_credentials(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        if value.username or value.password:
+            raise ValueError("Source URLs must not contain credentials")
+        return value
+
+
+class ResearchRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=2000)
+    campaign_id: int | None = None
+    sources: list[ResearchSourceInput] = Field(default_factory=list, max_length=8)
+
+    @field_validator("sources")
+    @classmethod
+    def limit_total_source_text(cls, sources: list[ResearchSourceInput]) -> list[ResearchSourceInput]:
+        if sum(len(source.excerpt) for source in sources) > 12000:
+            raise ValueError("Combined source excerpts must be 12,000 characters or fewer")
+        return sources
+
+
+class ResearchContextRequest(BaseModel):
+    research_record_ids: list[int] = Field(default_factory=list, max_length=8)
+
+
+class CopyRequest(ResearchContextRequest):
+    campaign_id: int | None = None
+    platform: str = Field(pattern="^(linkedin|instagram|facebook|youtube|x|tiktok)$")
+    brief: str = Field(min_length=3, max_length=2000)
+
+
+class CreativeRequest(ResearchContextRequest):
+    brief: str = Field(min_length=3, max_length=2000)
 
 
 class SubmissionRequest(BaseModel):
@@ -117,6 +168,73 @@ def get_scoped_item(db: Session, organization_id: int, item_id: int) -> ContentI
     if item is None:
         raise HTTPException(status_code=404, detail="Content not found")
     return item
+
+
+def scoped_research_sources(db: Session, organization_id: int, record_ids: list[int]) -> list[ResearchSource]:
+    unique_ids = list(dict.fromkeys(record_ids))
+    if not unique_ids:
+        return []
+    records = db.scalars(select(ResearchRecord.id).where(
+        ResearchRecord.organization_id == organization_id,
+        ResearchRecord.id.in_(unique_ids),
+    )).all()
+    if set(records) != set(unique_ids):
+        raise HTTPException(status_code=404, detail="Research record not found")
+    return db.scalars(select(ResearchSource).where(
+        ResearchSource.organization_id == organization_id,
+        ResearchSource.research_record_id.in_(unique_ids),
+    ).order_by(ResearchSource.id)).all()
+
+
+def validate_source_ids(db: Session, organization_id: int, source_ids: list[int]) -> list[int]:
+    unique_ids = list(dict.fromkeys(source_ids))
+    if not unique_ids:
+        return []
+    rows = db.scalars(select(ResearchSource.id).where(
+        ResearchSource.organization_id == organization_id,
+        ResearchSource.id.in_(unique_ids),
+    )).all()
+    if set(rows) != set(unique_ids):
+        raise HTTPException(status_code=404, detail="Research source not found")
+    return unique_ids
+
+
+def research_context(sources: list[ResearchSource]) -> list[dict[str, Any]]:
+    return [{
+        "id": source.id,
+        "title": source.title,
+        "url": source.url,
+        "source_type": source.source_type,
+        "excerpt": source.excerpt,
+    } for source in sources]
+
+
+def brand_context(brand: BrandProfile | None) -> dict[str, Any]:
+    if brand is None:
+        return {}
+    return {
+        "name": brand.name,
+        "value_proposition": brand.value_proposition,
+        "audience": brand.audience,
+        "tone": brand.tone,
+        "preferred_vocabulary": brand.preferred_vocabulary,
+        "prohibited_claims": brand.prohibited_claims,
+    }
+
+
+def execute_ai(db: Session, organization_id: int, user_id: int, agent_name: str,
+               schema: type[BaseModel], input_data: dict[str, Any],
+               input_refs: dict[str, Any]) -> tuple[BaseModel, AgentRun]:
+    try:
+        return execute_workflow(
+            db, organization_id, user_id, agent_name, schema, input_data, input_refs
+        )
+    except WorkflowExecutionError as error:
+        db.commit()
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI workflow failed ({error.code}); run {error.run.id} is available in Agent Activity.",
+        ) from error
 
 
 @app.get("/health/live")
@@ -355,25 +473,33 @@ def create_content(workspace_id: int, payload: ContentRequest, user: User = Depe
         Campaign.id == payload.campaign_id, Campaign.organization_id == workspace_id
     )) is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
+    source_references = validate_source_ids(db, workspace_id, payload.source_references)
     item = ContentItem(organization_id=workspace_id, campaign_id=payload.campaign_id, title=payload.title,
                        platform=payload.platform.lower(), created_by=user.id)
     db.add(item)
     db.flush()
-    version = make_version(db, item, payload.body, payload.media_manifest, user.id)
+    version = make_version(db, item, payload.body, payload.media_manifest, user.id, source_references)
     item.current_version_id = version.id
     audit(db, workspace_id, user.id, "content.created", "content_item", item.id)
     db.commit()
     return {**as_dict(item), "version": as_dict(version)}
 
 
-def make_version(db: Session, item: ContentItem, body: str, media_manifest: list, user_id: int) -> ContentVersion:
+def make_version(db: Session, item: ContentItem, body: str, media_manifest: list, user_id: int,
+                 source_references: list[int] | None = None) -> ContentVersion:
     previous = db.scalar(select(ContentVersion).where(ContentVersion.content_item_id == item.id)
                          .order_by(ContentVersion.number.desc()))
     number = 1 if previous is None else previous.number + 1
-    fingerprint = hashlib.sha256(json.dumps({"body": body, "media": media_manifest},
+    source_references = source_references or []
+    fingerprint = hashlib.sha256(json.dumps({
+        "body": body,
+        "media": media_manifest,
+        "source_references": source_references,
+    },
                                                sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     version = ContentVersion(content_item_id=item.id, number=number, body=body,
-                             media_manifest=media_manifest, fingerprint=fingerprint, created_by=user_id)
+                             media_manifest=media_manifest, source_references=source_references,
+                             fingerprint=fingerprint, created_by=user_id)
     db.add(version)
     db.flush()
     item.current_version_id = version.id
@@ -394,10 +520,11 @@ def create_version(workspace_id: int, item_id: int, payload: ContentRequest, use
         Campaign.id == payload.campaign_id, Campaign.organization_id == workspace_id
     )) is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
+    source_references = validate_source_ids(db, workspace_id, payload.source_references)
     item.title = payload.title
     item.platform = payload.platform.lower()
     item.campaign_id = payload.campaign_id
-    version = make_version(db, item, payload.body, payload.media_manifest, user.id)
+    version = make_version(db, item, payload.body, payload.media_manifest, user.id, source_references)
     audit(db, workspace_id, user.id, "content.version_created", "content_item", item.id, {"version": version.number})
     db.commit()
     return {**as_dict(item), "version": as_dict(version)}
@@ -432,6 +559,7 @@ def quality_check(workspace_id: int, item_id: int, user: User = Depends(current_
     findings.append({"severity": "warning", "code": "human_fact_check", "message": "Verify factual claims and media rights before approval."})
     result = QualityReview(organization_id=workspace_id, content_version_id=version.id,
                            brand_fingerprint=fingerprint_brand(brand),
+                           review_type="deterministic",
                            passed=not any(f["severity"] == "blocking" for f in findings), findings=findings)
     db.add(result)
     audit(db, workspace_id, user.id, "quality.checked", "content_version", version.id, {"passed": result.passed})
@@ -458,12 +586,22 @@ def submit_approval(workspace_id: int, item_id: int, payload: SubmissionRequest,
     review = db.scalar(select(QualityReview).where(
         QualityReview.organization_id == workspace_id,
         QualityReview.content_version_id == version.id,
+        QualityReview.review_type == "deterministic",
     ).order_by(QualityReview.id.desc()))
     if review is None or not review.passed:
         raise HTTPException(status_code=409, detail="Run a passing quality review before requesting approval")
     brand = db.scalar(select(BrandProfile).where(BrandProfile.organization_id == workspace_id))
     if review.brand_fingerprint != fingerprint_brand(brand):
         raise HTTPException(status_code=409, detail="Brand guidance changed; rerun the quality review")
+    ai_review = db.scalar(select(QualityReview).where(
+        QualityReview.organization_id == workspace_id,
+        QualityReview.content_version_id == version.id,
+        QualityReview.review_type == "ai",
+    ).order_by(QualityReview.id.desc()))
+    if ai_review is not None and (
+        not ai_review.passed or ai_review.brand_fingerprint != fingerprint_brand(brand)
+    ):
+        raise HTTPException(status_code=409, detail="The latest AI review requires changes or is out of date")
     approval = Approval(organization_id=workspace_id, content_item_id=item.id, content_version_id=version.id,
                         version_fingerprint=version.fingerprint, brand_fingerprint=review.brand_fingerprint,
                         social_account_id=account.id,
@@ -489,10 +627,19 @@ def list_approvals(workspace_id: int, status: str | None = None, user: User = De
         item = db.get(ContentItem, approval.content_item_id)
         version = db.get(ContentVersion, approval.content_version_id)
         account = db.get(SocialAccount, approval.social_account_id)
-        review = db.scalar(select(QualityReview).where(
+        reviews = db.scalars(select(QualityReview).where(
             QualityReview.content_version_id == approval.content_version_id,
             QualityReview.organization_id == workspace_id,
-        ).order_by(QualityReview.id.desc()))
+        ).order_by(QualityReview.id.desc())).all()
+        latest_reviews = {}
+        for review in reviews:
+            latest_reviews.setdefault(review.review_type, review)
+        source_rows = []
+        if version and version.source_references:
+            source_rows = db.scalars(select(ResearchSource).where(
+                ResearchSource.organization_id == workspace_id,
+                ResearchSource.id.in_(version.source_references),
+            )).all()
         result.append({
             **as_dict(approval),
             "content_title": item.title if item else "",
@@ -500,7 +647,12 @@ def list_approvals(workspace_id: int, status: str | None = None, user: User = De
             "version_number": version.number if version else None,
             "platform": item.platform if item else "",
             "account_name": account.display_name if account else "",
-            "quality_findings": review.findings if review else [],
+            "source_references": [as_dict(source) for source in source_rows],
+            "quality_findings": [
+                {"review_type": review.review_type, **finding}
+                for review in latest_reviews.values()
+                for finding in review.findings
+            ],
         })
     return result
 
@@ -626,3 +778,339 @@ def list_audit_logs(workspace_id: int, user: User = Depends(current_user),
     return [as_dict(row) for row in db.scalars(
         select(AuditLog).where(AuditLog.organization_id == workspace_id).order_by(AuditLog.id.desc()).limit(200)
     )]
+
+
+def research_response(db: Session, record: ResearchRecord) -> dict[str, Any]:
+    sources = db.scalars(select(ResearchSource).where(
+        ResearchSource.research_record_id == record.id,
+        ResearchSource.organization_id == record.organization_id,
+    ).order_by(ResearchSource.id)).all()
+    run = db.get(AgentRun, record.agent_run_id) if record.agent_run_id else None
+    return {
+        **as_dict(record),
+        "sources": [as_dict(source) for source in sources],
+        "agent_run": as_dict(run) if run is not None else None,
+    }
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/research", status_code=201)
+def create_research(workspace_id: int, payload: ResearchRequest, user: User = Depends(current_user),
+                    db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "strategist", "creator")
+    if payload.campaign_id and db.scalar(select(Campaign).where(
+        Campaign.id == payload.campaign_id, Campaign.organization_id == workspace_id
+    )) is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    record = ResearchRecord(
+        organization_id=workspace_id,
+        campaign_id=payload.campaign_id,
+        created_by=user.id,
+        question=payload.question,
+        status="running",
+    )
+    db.add(record)
+    db.flush()
+    sources = []
+    for source_input in payload.sources:
+        source = ResearchSource(
+            organization_id=workspace_id,
+            research_record_id=record.id,
+            title=source_input.title,
+            url=str(source_input.url),
+            source_type=source_input.source_type,
+            excerpt=source_input.excerpt,
+        )
+        db.add(source)
+        sources.append(source)
+    db.flush()
+    source_ids = [source.id for source in sources]
+    source_data = research_context(sources)
+    try:
+        result, run = execute_workflow(
+            db,
+            workspace_id,
+            user.id,
+            "market_intelligence",
+            ResearchOutput,
+            {"question": payload.question, "sources": source_data},
+            {"research_record_id": record.id, "campaign_id": payload.campaign_id,
+             "source_ids": source_ids},
+        )
+    except WorkflowExecutionError as error:
+        record.status = "failed"
+        record.agent_run_id = error.run.id
+        audit(db, workspace_id, user.id, "research.failed", "research_record", record.id,
+              {"run_id": error.run.id, "error_code": error.code})
+        db.commit()
+        raise HTTPException(
+            status_code=502,
+            detail=f"Research workflow failed ({error.code}); run {error.run.id} is available in Agent Activity.",
+        ) from error
+    record.status = "completed"
+    record.agent_run_id = run.id
+    record.findings = [finding.model_dump(mode="json") for finding in result.findings]
+    record.recommendations = result.recommendations
+    record.completed_at = datetime.now(timezone.utc)
+    audit(db, workspace_id, user.id, "research.completed", "research_record", record.id,
+          {"run_id": run.id, "source_count": len(sources)})
+    db.commit()
+    return research_response(db, record)
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/research")
+def list_research(workspace_id: int, user: User = Depends(current_user),
+                  db: Session = Depends(get_db)) -> list[dict]:
+    workspace_member(db, user, workspace_id)
+    records = db.scalars(select(ResearchRecord).where(
+        ResearchRecord.organization_id == workspace_id
+    ).order_by(ResearchRecord.id.desc()).limit(100)).all()
+    return [research_response(db, record) for record in records]
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/campaigns/{campaign_id}/strategy")
+def create_campaign_strategy(workspace_id: int, campaign_id: int, payload: ResearchContextRequest,
+                             user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "strategist", "creator")
+    campaign = db.scalar(select(Campaign).where(
+        Campaign.id == campaign_id, Campaign.organization_id == workspace_id
+    ))
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    brand = db.scalar(select(BrandProfile).where(BrandProfile.organization_id == workspace_id))
+    sources = scoped_research_sources(db, workspace_id, payload.research_record_ids)
+    source_ids = [source.id for source in sources]
+    output, run = execute_ai(
+        db,
+        workspace_id,
+        user.id,
+        "content_strategist",
+        StrategyOutput,
+        {
+            "campaign": {
+                "id": campaign.id, "name": campaign.name, "objective": campaign.objective,
+                "audience": campaign.audience, "starts_at": campaign.starts_at, "ends_at": campaign.ends_at,
+            },
+            "brand": brand_context(brand),
+            "research": research_context(sources),
+            "source_ids": source_ids,
+        },
+        {"campaign_id": campaign.id, "research_record_ids": payload.research_record_ids,
+         "source_ids": source_ids},
+    )
+    audit(db, workspace_id, user.id, "campaign.strategy_generated", "campaign", campaign.id,
+          {"run_id": run.id})
+    db.commit()
+    return {"strategy": output.model_dump(mode="json"), "agent_run": as_dict(run)}
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/content/generate", status_code=201)
+def generate_content(workspace_id: int, payload: CopyRequest, user: User = Depends(current_user),
+                     db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "strategist", "creator")
+    campaign = None
+    if payload.campaign_id:
+        campaign = db.scalar(select(Campaign).where(
+            Campaign.id == payload.campaign_id, Campaign.organization_id == workspace_id
+        ))
+        if campaign is None:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+    sources = scoped_research_sources(db, workspace_id, payload.research_record_ids)
+    source_ids = [source.id for source in sources]
+    brand = db.scalar(select(BrandProfile).where(BrandProfile.organization_id == workspace_id))
+    output, run = execute_ai(
+        db,
+        workspace_id,
+        user.id,
+        "cross_platform_copywriter",
+        CopyOutput,
+        {
+            "brief": payload.brief,
+            "platform": payload.platform,
+            "campaign": ({"id": campaign.id, "name": campaign.name, "objective": campaign.objective,
+                          "audience": campaign.audience} if campaign else {}),
+            "brand": brand_context(brand),
+            "research": research_context(sources),
+            "source_ids": source_ids,
+        },
+        {"campaign_id": campaign.id if campaign else None,
+         "research_record_ids": payload.research_record_ids, "source_ids": source_ids},
+    )
+    parts = [part for part in (output.hook, output.body, output.call_to_action) if part]
+    if output.hashtags:
+        parts.append(" ".join(f"#{tag.lstrip('#')}" for tag in output.hashtags))
+    body = "\n\n".join(parts)
+    if len(body) > 3000:
+        run.status = "failed"
+        run.error_code = "draft_exceeds_limit"
+        db.commit()
+        raise HTTPException(status_code=422, detail="Generated draft exceeded the content limit; adjust the brief and try again.")
+    item = ContentItem(
+        organization_id=workspace_id,
+        campaign_id=campaign.id if campaign else None,
+        title=output.title,
+        platform=payload.platform,
+        status="draft",
+        created_by=user.id,
+    )
+    db.add(item)
+    db.flush()
+    version = make_version(db, item, body, [], user.id, output.source_ids)
+    item.current_version_id = version.id
+    run.content_version_id = version.id
+    audit(db, workspace_id, user.id, "content.ai_draft_created", "content_item", item.id,
+          {"run_id": run.id, "version_id": version.id, "platform": payload.platform})
+    db.commit()
+    return {
+        **as_dict(item),
+        "version": as_dict(version),
+        "draft_notes": {"call_to_action": output.call_to_action, "hashtags": output.hashtags,
+                        "assumptions": output.assumptions},
+        "agent_run": as_dict(run),
+    }
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/campaigns/{campaign_id}/creative-concepts")
+def create_creative_concepts(workspace_id: int, campaign_id: int, payload: CreativeRequest,
+                             user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "strategist", "creator")
+    campaign = db.scalar(select(Campaign).where(
+        Campaign.id == campaign_id, Campaign.organization_id == workspace_id
+    ))
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    sources = scoped_research_sources(db, workspace_id, payload.research_record_ids)
+    source_ids = [source.id for source in sources]
+    output, run = execute_ai(
+        db, workspace_id, user.id, "creative_director", CreativeOutput,
+        {"brief": payload.brief, "campaign": {"id": campaign.id, "name": campaign.name},
+         "sources": research_context(sources), "source_ids": source_ids},
+        {"campaign_id": campaign.id, "research_record_ids": payload.research_record_ids,
+         "source_ids": source_ids},
+    )
+    audit(db, workspace_id, user.id, "creative.concepts_generated", "campaign", campaign.id,
+          {"run_id": run.id})
+    db.commit()
+    return {"concepts": output.model_dump(mode="json"), "agent_run": as_dict(run)}
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/content/{item_id}/ai-review")
+def review_content_with_ai(workspace_id: int, item_id: int, user: User = Depends(current_user),
+                           db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin", "strategist", "creator")
+    item = get_scoped_item(db, workspace_id, item_id)
+    version = db.get(ContentVersion, item.current_version_id)
+    if version is None:
+        raise HTTPException(status_code=409, detail="Content has no current version")
+    brand = db.scalar(select(BrandProfile).where(BrandProfile.organization_id == workspace_id))
+    sources = db.scalars(select(ResearchSource).where(
+        ResearchSource.organization_id == workspace_id,
+        ResearchSource.id.in_(version.source_references or [-1]),
+    )).all()
+    source_ids = [source.id for source in sources]
+    output, run = execute_ai(
+        db, workspace_id, user.id, "quality_brand_safety_reviewer", ReviewOutput,
+        {"body": version.body, "platform": item.platform,
+         "brand": brand_context(brand),
+         "sources": research_context(sources), "source_ids": source_ids},
+        {"content_item_id": item.id, "content_version_id": version.id, "source_ids": source_ids},
+    )
+    findings = [finding.model_dump(mode="json") for finding in output.findings]
+    findings.extend({
+        "severity": "warning",
+        "code": "claim_needs_source",
+        "message": f"Verify this claim against an authoritative source: {claim}",
+        "remediation": "Attach a source reference or revise the claim.",
+    } for claim in output.claims_requiring_sources)
+    findings.extend({
+        "severity": "info",
+        "code": "review_limitation",
+        "message": limitation,
+        "remediation": "",
+    } for limitation in output.limitations)
+    result = QualityReview(
+        organization_id=workspace_id,
+        content_version_id=version.id,
+        brand_fingerprint=fingerprint_brand(brand),
+        review_type="ai",
+        agent_run_id=run.id,
+        passed=output.recommendation == "pass" and not any(
+            finding["severity"] == "blocking" for finding in findings
+        ),
+        findings=findings,
+    )
+    db.add(result)
+    audit(db, workspace_id, user.id, "quality.ai_reviewed", "content_version", version.id,
+          {"run_id": run.id, "passed": result.passed})
+    db.commit()
+    return {**as_dict(result), "recommendation": output.recommendation,
+            "limitations": output.limitations, "agent_run_id": run.id}
+
+
+PLATFORM_TEXT_LIMITS = {
+    "linkedin": 3000,
+    "instagram": 2200,
+    "facebook": 63206,
+    "youtube": 5000,
+    "x": 280,
+    "tiktok": 2200,
+}
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/content/{item_id}/platform-preview")
+def get_platform_preview(workspace_id: int, item_id: int, user: User = Depends(current_user),
+                         db: Session = Depends(get_db)) -> dict:
+    workspace_member(db, user, workspace_id)
+    item = get_scoped_item(db, workspace_id, item_id)
+    version = db.get(ContentVersion, item.current_version_id)
+    if version is None:
+        raise HTTPException(status_code=409, detail="Content has no current version")
+    limit = PLATFORM_TEXT_LIMITS.get(item.platform)
+    if limit is None:
+        raise HTTPException(status_code=422, detail="No local preview limit is configured for this platform.")
+    warnings = ["Approximate text-only preview; actual platform rendering and account capabilities may differ."]
+    if not version.media_manifest:
+        warnings.append("No media is attached; confirm whether the selected platform format requires media.")
+    preview = PlatformPreview(
+        platform=item.platform,
+        character_count=len(version.body),
+        character_limit=limit,
+        within_limit=len(version.body) <= limit,
+        preview_text=version.body,
+        warnings=warnings,
+    )
+    return preview.model_dump()
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/agent-runs")
+def list_agent_runs(workspace_id: int, limit: int = 50, user: User = Depends(current_user),
+                    db: Session = Depends(get_db)) -> list[dict]:
+    workspace_member(db, user, workspace_id)
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="Limit must be between 1 and 100")
+    runs = db.scalars(select(AgentRun).where(
+        AgentRun.organization_id == workspace_id
+    ).order_by(AgentRun.id.desc()).limit(limit)).all()
+    return [as_dict(run) for run in runs]
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/usage")
+def get_ai_usage(workspace_id: int, user: User = Depends(current_user),
+                 db: Session = Depends(get_db)) -> dict:
+    workspace_member(db, user, workspace_id)
+    events = db.scalars(select(UsageEvent).where(
+        UsageEvent.organization_id == workspace_id
+    ).order_by(UsageEvent.id.desc()).limit(1000)).all()
+    return {
+        "event_count": len(events),
+        "input_tokens": sum(event.input_tokens for event in events),
+        "output_tokens": sum(event.output_tokens for event in events),
+        "estimated_events": sum(1 for event in events if event.is_estimated),
+        "known_cost_usd": round(sum(event.cost_usd or 0 for event in events), 6),
+        "cost_note": "Provider cost is unknown unless the provider supplies billing data; local mock token counts are estimates.",
+        "events": [as_dict(event) for event in events],
+    }

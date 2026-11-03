@@ -1,6 +1,6 @@
 # AI Content Manager SaaS
 
-A working Phase 1 vertical slice for multi-tenant social content workflows. The application includes an authenticated FastAPI API, a Next.js dashboard, PostgreSQL migrations, a database-backed publishing worker, and an idempotent local mock social adapter.
+A working Phase 1 foundation with a Phase 2 AI workflow slice for multi-tenant social content. The application includes an authenticated FastAPI API, a Next.js dashboard, PostgreSQL migrations, a database-backed publishing worker, an idempotent local mock social adapter, and structured research/strategy/drafting/review agents.
 
 ## What works today
 
@@ -12,8 +12,10 @@ A working Phase 1 vertical slice for multi-tenant social content workflows. The 
 - A persistent publish queue with idempotency, approval/approver/account revalidation, audit events, and mock provider confirmation.
 - Responsive web dashboard to exercise the workflow without platform credentials.
 - PostgreSQL/Redis/API/worker/web Docker Compose setup.
+- Source-linked research and structured Market Intelligence, Content Strategist, Cross-Platform Copywriter, Creative Director, and Quality/Brand Safety workflows.
+- Tenant-scoped agent run history, token usage records, and approximate text-only platform previews.
 
-Real social network APIs, file uploads, calendar scheduling, AI provider integrations, analytics ingestion, and production identity-provider integration are not enabled. The mock adapter never sends an external post.
+Real social network APIs, file uploads, calendar scheduling, analytics ingestion, and production identity-provider integration are not enabled. Mock AI is the default; an optional server-configured OpenAI-compatible LLM provider is supported. The mock social adapter never sends an external post.
 
 ## Run with Docker Compose
 
@@ -27,6 +29,10 @@ docker compose up --build
 Open [http://localhost:3000](http://localhost:3000) for the web app and [http://localhost:8000/docs](http://localhost:8000/docs) for the API docs. Liveness and readiness checks are at `/health/live` and `/health/ready`. Compose runs Alembic migrations before starting the API and starts the publishing worker against the same database.
 
 Sign up, create a mock social account and campaign, create a draft, run its quality check, then request approval. To complete approval, register a second user, sign in as the workspace owner, add that user with the `approver` role under **Team**, then sign in as the approver and approve the pending item. The worker will process queued jobs automatically; the **Publishing** page also has a manual mock dispatch action for local workflow testing.
+
+To try Phase 2, add a research question and source excerpt under **Research**, then use the research record ID in **AI Studio** to generate strategy, creative concepts, or a platform-specific draft. AI-generated content is an editable draft. Review the structured source citations, run both quality checks as needed, and retain the human approval step before publishing.
+
+The default `LLM_PROVIDER=mock` does not send data externally. To opt into a configured OpenAI-compatible provider, set `LLM_PROVIDER=openai-compatible`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_BASE_URL` in the server `.env`, then restart the stack. Remote provider URLs must use HTTPS. Review the provider’s data-handling terms before sending customer content or source excerpts.
 
 ## Run services locally without Docker
 
@@ -78,7 +84,9 @@ npm run build
 Pop-Location
 ```
 
-The API tests use an isolated in-memory SQLite database and cover registration, the draft/review/approval/mock-publish journey, tenant isolation, author/approver controls, approval invalidation, revoked approvers, quality blocks, and idempotent dispatch.
+The API tests use isolated SQLite databases and cover migrations from the Phase 1 schema, source-linked research, structured AI workflows, tenant isolation, provider errors, quality blocks, approval invalidation, and mock publishing.
+
+The Phase 2 synthetic AI evaluation corpus can be run from `apps/api` with `python -m app.evaluate_ai`. It uses the mock provider by default; evaluating a configured live provider requires the explicit `--allow-live-provider` flag and may incur costs. See [apps/api/README.md](apps/api/README.md) for details.
 
 ## Security and production notes
 

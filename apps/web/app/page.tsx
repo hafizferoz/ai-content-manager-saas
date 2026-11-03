@@ -5,7 +5,7 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 type AnyRecord = Record<string, any>;
 type Workspace = { id: number; name: string; role: string };
-const tabs = ["Overview", "Brand", "Campaigns", "Content", "Approvals", "Accounts", "Publishing", "Team", "Audit"];
+const tabs = ["Overview", "Brand", "Campaigns", "Research", "AI Studio", "Content", "Approvals", "Accounts", "Publishing", "Agent Activity", "Usage", "Team", "Audit"];
 
 export default function Home() {
   const [token, setToken] = useState("");
@@ -16,6 +16,9 @@ export default function Home() {
   const [notice, setNotice] = useState("");
   const [data, setData] = useState<AnyRecord[]>([]);
   const [brand, setBrand] = useState<AnyRecord>({ name: "", value_proposition: "", audience: "", tone: "", preferred_vocabulary: [], prohibited_claims: [] });
+  const [usage, setUsage] = useState<AnyRecord | null>(null);
+  const [aiResult, setAiResult] = useState<AnyRecord | null>(null);
+  const [preview, setPreview] = useState<AnyRecord | null>(null);
   const [loading, setLoading] = useState(false);
 
   const request = useCallback(async (path: string, init: RequestInit = {}) => {
@@ -39,11 +42,19 @@ export default function Home() {
         Approvals: `/api/v1/workspaces/${workspace.id}/approvals`,
         Accounts: `/api/v1/workspaces/${workspace.id}/social-accounts`,
         Publishing: `/api/v1/workspaces/${workspace.id}/publish-jobs`,
+        Research: `/api/v1/workspaces/${workspace.id}/research`,
+        "Agent Activity": `/api/v1/workspaces/${workspace.id}/agent-runs`,
         Team: `/api/v1/workspaces/${workspace.id}/members`,
         Audit: `/api/v1/workspaces/${workspace.id}/audit-logs`,
       };
       if (tab === "Brand") setBrand(await request(`/api/v1/workspaces/${workspace.id}/brand`));
-      setData(routes[tab] ? await request(routes[tab]) : []);
+      if (tab === "Usage") {
+        setUsage(await request(`/api/v1/workspaces/${workspace.id}/usage`));
+        setData([]);
+      } else {
+        setUsage(null);
+        setData(routes[tab] ? await request(routes[tab]) : []);
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not load workspace");
     } finally {
@@ -82,6 +93,17 @@ export default function Home() {
       form.reset();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Request failed");
+    }
+  }
+
+  async function runWorkflow(path: string, payload: AnyRecord) {
+    try {
+      const result = await request(path, { method: "POST", body: JSON.stringify(payload) });
+      setAiResult(result);
+      setNotice("Workflow completed. Review the structured output before using it.");
+      await loadWorkspace();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "AI workflow failed");
     }
   }
 
@@ -157,6 +179,80 @@ export default function Home() {
           <button className="primary">Save brand</button>
         </form>}
         {tab === "Campaigns" && <><form className="panel form-grid" onSubmit={(event) => submit(event, `${base}/campaigns`)}><h2>New campaign</h2><label>Name<input name="name" required /></label><label>Objective<input name="objective" /></label><label className="wide">Audience<textarea name="audience" rows={2} /></label><button className="primary">Create campaign</button></form><RecordList rows={data} kind="campaign" /></>}
+        {tab === "Research" && <><form className="panel form-grid" onSubmit={async (event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const values = Object.fromEntries(new FormData(form).entries());
+          const excerpt = String(values.excerpt ?? "").trim();
+          const sources = excerpt ? [{
+            title: values.source_title,
+            url: values.source_url,
+            source_type: values.source_type,
+            excerpt,
+          }] : [];
+          await submit(event, `${base}/research`, "POST", {
+            question: values.question,
+            campaign_id: values.campaign_id ? Number(values.campaign_id) : null,
+            sources,
+          });
+        }}>
+          <h2>Source-linked research</h2>
+          <label>Research question<input name="question" required minLength={3} /></label>
+          <label>Campaign ID (optional)<input name="campaign_id" type="number" /></label>
+          <label>Source title (optional)<input name="source_title" /></label>
+          <label>Source URL<input name="source_url" type="url" /></label>
+          <label>Source type<select name="source_type"><option value="web">Web</option><option value="document">Document</option><option value="interview">Interview</option><option value="internal">Internal</option></select></label>
+          <label className="wide">Excerpt<textarea name="excerpt" rows={4} maxLength={6000} /></label>
+          <button className="primary">Analyze supplied sources</button>
+          <p className="helper wide">Mock mode does not fetch URLs. Add excerpts you have permission to use; source text is treated as untrusted data and never as instructions.</p>
+        </form><RecordList rows={data} kind="research" /></>}
+        {tab === "AI Studio" && <div className="ai-studio">
+          <div className="callout"><strong>AI provider:</strong> Mock by default. Configure a trusted OpenAI-compatible provider on the server to send workflow inputs to that provider. Generated content remains a draft and still requires quality checks and human approval.</div>
+          <form className="panel form-grid" onSubmit={(event) => {
+            event.preventDefault();
+            const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+            void runWorkflow(`${base}/content/generate`, {
+              platform: values.platform,
+              brief: values.brief,
+              campaign_id: values.campaign_id ? Number(values.campaign_id) : null,
+              research_record_ids: parseIds(values.research_record_ids),
+            });
+          }}>
+            <h2>Cross-platform copywriter</h2>
+            <label>Platform<select name="platform"><option value="linkedin">LinkedIn</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="youtube">YouTube</option><option value="x">X</option><option value="tiktok">TikTok</option></select></label>
+            <label>Campaign ID (optional)<input name="campaign_id" type="number" /></label>
+            <label className="wide">Brief<textarea name="brief" required minLength={3} maxLength={2000} rows={3} /></label>
+            <label className="wide">Research record IDs (comma separated)<input name="research_record_ids" placeholder="1, 2" /></label>
+            <button className="primary">Generate editable draft</button>
+          </form>
+          <form className="panel form-grid" onSubmit={(event) => {
+            event.preventDefault();
+            const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+            const path = `${base}/campaigns/${Number(values.campaign_id)}/strategy`;
+            void runWorkflow(path, { research_record_ids: parseIds(values.research_record_ids) });
+          }}>
+            <h2>Content strategist</h2>
+            <label>Campaign ID<input name="campaign_id" type="number" required /></label>
+            <label>Research record IDs<input name="research_record_ids" placeholder="1, 2" /></label>
+            <button className="primary">Create campaign strategy</button>
+          </form>
+          <form className="panel form-grid" onSubmit={(event) => {
+            event.preventDefault();
+            const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+            const path = `${base}/campaigns/${Number(values.campaign_id)}/creative-concepts`;
+            void runWorkflow(path, {
+              brief: values.brief,
+              research_record_ids: parseIds(values.research_record_ids),
+            });
+          }}>
+            <h2>Creative director</h2>
+            <label>Campaign ID<input name="campaign_id" type="number" required /></label>
+            <label>Research record IDs<input name="research_record_ids" placeholder="1, 2" /></label>
+            <label className="wide">Creative brief<textarea name="brief" minLength={3} maxLength={2000} required rows={3} /></label>
+            <button className="primary">Generate concepts</button>
+          </form>
+          {aiResult && <pre className="panel output-json">{JSON.stringify(aiResult, null, 2)}</pre>}
+        </div>}
         {tab === "Content" && <>{contentForm}<RecordList rows={data} kind="content" onAction={async (row, action) => {
           try {
             if (action === "revise") {
@@ -170,9 +266,16 @@ export default function Home() {
                   body,
                   campaign_id: row.campaign_id,
                   media_manifest: row.version?.media_manifest ?? [],
+                  source_references: row.version?.source_references ?? [],
                 }),
               });
               setNotice("New version saved. Any earlier approval has been invalidated.");
+            } else if (action === "preview") {
+              setPreview(await request(`${base}/content/${row.id}/platform-preview`));
+              setNotice("Preview is approximate and text-only; confirm platform capability before publishing.");
+            } else if (action === "ai-review") {
+              const result = await request(`${base}/content/${row.id}/ai-review`, { method: "POST" });
+              setNotice(result.passed ? "Advisory AI review complete; verify its findings." : "AI review requires changes before approval.");
             } else if (action === "quality") {
               const result = await request(`${base}/content/${row.id}/quality-check`, { method: "POST" });
               setNotice(result.passed ? "Quality checks passed with a review reminder." : `Review blocked: ${result.findings.filter((f: AnyRecord) => f.severity === "blocking").map((f: AnyRecord) => f.message).join(" ")}`);
@@ -185,7 +288,7 @@ export default function Home() {
             }
             await loadWorkspace();
           } catch (error) { setNotice(error instanceof Error ? error.message : "Action failed"); }
-        }} /></>}
+        }} />{preview && <div className="panel preview-panel"><div className="panel-heading"><h2>Approximate {preview.platform} preview</h2><button className="link-button" onClick={() => setPreview(null)}>Close</button></div><p>{preview.preview_text}</p><small>{preview.character_count}/{preview.character_limit} characters · Not an official platform rendering</small><ul>{preview.warnings.map((warning: string) => <li key={warning}>{warning}</li>)}</ul></div>}</>}
         {tab === "Approvals" && <RecordList rows={data} kind="approval" onAction={async (row, action) => {
           try {
             const result = await request(`${base}/approvals/${row.id}/decision`, { method: "POST", body: JSON.stringify({ decision: action, comment: "" }) });
@@ -201,6 +304,8 @@ export default function Home() {
             await loadWorkspace();
           } catch (error) { setNotice(error instanceof Error ? error.message : "Decision failed"); }
         }} />}
+        {tab === "Agent Activity" && <RecordList rows={data} kind="agent" emptyText="Completed and failed AI runs will appear here with provider, model, timing, outputs, and usage." />}
+        {tab === "Usage" && <div className="metric-grid"><Metric label="AI runs with usage" value={usage?.event_count ?? 0} /><Metric label="Input tokens" value={usage?.input_tokens ?? 0} /><Metric label="Output tokens" value={usage?.output_tokens ?? 0} /><Metric label="Estimated token records" value={usage?.estimated_events ?? 0} />{usage && <div className="callout wide">{usage.cost_note}</div>}</div>}
         {tab === "Accounts" && <><form className="panel form-grid" onSubmit={(event) => submit(event, `${base}/social-accounts`)}><h2>Add local mock account</h2><label>Platform<select name="platform"><option value="linkedin">LinkedIn</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="youtube">YouTube</option><option value="x">X</option><option value="tiktok">TikTok</option></select></label><label>Account name<input name="display_name" required /></label><label>Destination ID<input name="external_account_id" required /></label><input type="hidden" name="is_mock" value="true" /><button className="primary">Add mock account</button></form><RecordList rows={data} kind="account" /></>}
         {tab === "Publishing" && <RecordList rows={data} kind="job" onAction={async (row) => {
           try { await request(`${base}/publish-jobs/${row.id}/dispatch`, { method: "POST" }); setNotice("Mock provider confirmed the post."); await loadWorkspace(); }
@@ -215,6 +320,10 @@ export default function Home() {
 
 function stringList(value: unknown): string {
   return Array.isArray(value) ? value.join(", ") : String(value ?? "");
+}
+
+function parseIds(value: unknown): number[] {
+  return String(value ?? "").split(",").map((item) => Number(item.trim())).filter((item) => Number.isInteger(item) && item > 0);
 }
 
 function AuthForms({ onSubmit }: { onSubmit: (event: FormEvent<HTMLFormElement>, mode: "login" | "register") => void }) {
@@ -243,14 +352,18 @@ function RecordList({ rows, kind, onAction, emptyText }: { rows: AnyRecord[]; ki
   if (!rows.length) return <div className="empty panel"><span className="empty-icon">○</span><strong>Nothing here yet</strong><p>{emptyText ?? `New ${kind} records will appear here.`}</p></div>;
   return <div className="record-list">{rows.map((row) => {
     const version = row.version;
-    const label = row.content_title ?? row.title ?? row.name ?? row.display_name ?? `${kind} #${row.id}`;
-    const contentSummary = row.content_body ?? version?.body ?? row.objective ?? row.email ?? row.action ?? row.destination ?? row.error_message ?? row.external_account_id ?? row.comment ?? row.resource_type ?? "";
+    const label = row.content_title ?? row.title ?? row.name ?? row.display_name ?? row.question ?? row.agent_name ?? `${kind} #${row.id}`;
+    const contentSummary = row.content_body ?? version?.body ?? row.objective ?? row.email ?? row.action ?? row.destination ?? row.error_message ?? row.external_account_id ?? row.comment ?? row.resource_type ?? (row.output ? JSON.stringify(row.output) : "");
     return <article className="record panel" key={`${kind}-${row.id ?? row.user_id}`}>
       <div className="record-main"><strong>{label}</strong><p>{contentSummary}</p>
-        <small>{row.platform ?? row.role ?? row.status ?? row.action ?? ""}{row.account_name ? ` · ${row.account_name}` : ""}{row.destination ? ` · Destination: ${row.destination}` : ""}{row.version_number ? ` · Version ${row.version_number}` : ""}{version?.number ? ` · Version ${version.number}` : ""}{row.is_mock ? " · MOCK" : ""}</small>
-        {kind === "approval" && row.quality_findings?.length > 0 && <p className="helper">{row.quality_findings.map((finding: AnyRecord) => finding.message).join(" ")}</p>}
+        <small>ID {row.id ?? row.user_id}{row.platform ? ` · ${row.platform}` : ""}{row.role ? ` · ${row.role}` : ""}{row.provider ? ` · ${row.provider}/${row.model}` : ""}{row.duration_ms ? ` · ${row.duration_ms} ms` : ""}{row.status ? ` · ${row.status}` : ""}{row.account_name ? ` · ${row.account_name}` : ""}{row.destination ? ` · Destination: ${row.destination}` : ""}{row.version_number ? ` · Version ${row.version_number}` : ""}{version?.number ? ` · Version ${version.number}` : ""}{row.is_mock ? " · MOCK" : ""}</small>
+        {kind === "research" && row.findings?.length > 0 && <p className="helper">{row.findings.map((finding: AnyRecord) => `${finding.classification}: ${finding.statement} [source IDs: ${finding.source_ids.join(", ") || "none"}]`).join(" · ")}</p>}
+        {version?.source_references?.length > 0 && <p className="helper">Source IDs: {version.source_references.join(", ")}</p>}
+        {kind === "research" && row.sources?.length > 0 && <p className="helper">{row.sources.map((source: AnyRecord) => `Source ${source.id}: ${source.title} — ${source.url}`).join(" · ")}</p>}
+        {kind === "approval" && row.source_references?.length > 0 && <p className="helper">{row.source_references.map((source: AnyRecord) => `Source ${source.id}: ${source.title} — ${source.url}`).join(" · ")}</p>}
+        {kind === "approval" && row.quality_findings?.length > 0 && <p className="helper">{row.quality_findings.map((finding: AnyRecord) => `${finding.review_type}: ${finding.message}${finding.remediation ? ` (${finding.remediation})` : ""}`).join(" ")}</p>}
       </div>
-      {kind === "content" && onAction && <div className="record-actions"><button className="secondary" onClick={() => onAction(row, "revise")}>New version</button><button className="secondary" onClick={() => onAction(row, "quality")}>Quality check</button><button className="primary" onClick={() => onAction(row, "submit")}>Request approval</button></div>}
+      {kind === "content" && onAction && <div className="record-actions"><button className="secondary" onClick={() => onAction(row, "revise")}>New version</button><button className="secondary" onClick={() => onAction(row, "preview")}>Preview</button><button className="secondary" onClick={() => onAction(row, "quality")}>Quality check</button><button className="secondary" onClick={() => onAction(row, "ai-review")}>AI review</button><button className="primary" onClick={() => onAction(row, "submit")}>Request approval</button></div>}
       {kind === "approval" && row.status === "pending" && onAction && <div className="record-actions"><button className="primary" onClick={() => onAction(row, "approved")}>Approve</button><button className="secondary" onClick={() => onAction(row, "changes_requested")}>Request changes</button><button className="danger" onClick={() => onAction(row, "rejected")}>Reject</button></div>}
       {kind === "job" && row.status === "queued" && onAction && <button className="primary" onClick={() => onAction(row)}>Dispatch mock post</button>}
       {row.status && <span className={`status ${row.status}`}>{row.status.replaceAll("_", " ")}</span>}

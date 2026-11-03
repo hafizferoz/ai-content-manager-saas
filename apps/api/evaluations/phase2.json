@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "research-cites-evidence",
+      "agent": "market_intelligence",
+      "input": {
+        "question": "What onboarding guidance should the campaign teach?",
+        "sources": [
+          {
+            "id": 101,
+            "title": "Onboarding interview summary",
+            "url": "https://example.com/onboarding-summary",
+            "source_type": "document",
+            "excerpt": "Interview participants asked for short, practical setup instructions."
+          }
+        ]
+      },
+      "allowed_source_ids": [101],
+      "requirements": {
+        "fact_findings_require_citations": true
+      }
+    },
+    {
+      "id": "strategy-uses-scoped-research",
+      "agent": "content_strategist",
+      "input": {
+        "campaign": {
+          "id": 1,
+          "name": "First-week onboarding",
+          "objective": "Help new customers complete setup",
+          "audience": "New product users"
+        },
+        "brand": {
+          "name": "Northwind",
+          "value_proposition": "Practical tools for small teams",
+          "audience": "Small teams"
+        },
+        "research": [
+          {
+            "id": 201,
+            "title": "Onboarding interview summary",
+            "url": "https://example.com/onboarding-summary",
+            "source_type": "document",
+            "excerpt": "Interview participants asked for short, practical setup instructions."
+          }
+        ],
+        "source_ids": [201]
+      },
+      "allowed_source_ids": [201],
+      "requirements": {
+        "minimum_message_pillars": 1
+      }
+    },
+    {
+      "id": "copywriter-produces-safe-draft",
+      "agent": "cross_platform_copywriter",
+      "input": {
+        "brief": "Share one practical step that helps a new user complete initial setup.",
+        "platform": "linkedin",
+        "campaign": {
+          "id": 1,
+          "name": "First-week onboarding",
+          "objective": "Help new customers complete setup",
+          "audience": "New product users"
+        },
+        "brand": {
+          "name": "Northwind",
+          "value_proposition": "Practical tools for small teams",
+          "audience": "Small teams",
+          "tone": "Clear and helpful",
+          "prohibited_claims": ["guaranteed results"]
+        },
+        "research": [
+          {
+            "id": 301,
+            "title": "Onboarding interview summary",
+            "url": "https://example.com/onboarding-summary",
+            "source_type": "document",
+            "excerpt": "Interview participants asked for short, practical setup instructions."
+          }
+        ],
+        "source_ids": [301]
+      },
+      "allowed_source_ids": [301],
+      "requirements": {
+        "forbidden_copy_phrases": ["guaranteed results"]
+      }
+    },
+    {
+      "id": "creative-concept-has-production-guidance",
+      "agent": "creative_director",
+      "input": {
+        "brief": "Show one practical first-week setup step for a small team.",
+        "campaign": {
+          "name": "First-week onboarding"
+        },
+        "brand": {
+          "name": "Northwind"
+        },
+        "research": [],
+        "source_ids": []
+      },
+      "allowed_source_ids": [],
+      "requirements": {
+        "creative_concepts_require_visual_prompts": true
+      }
+    },
+    {
+      "id": "reviewer-blocks-prohibited-claim",
+      "agent": "quality_brand_safety_reviewer",
+      "input": {
+        "title": "A guaranteed outcome",
+        "body": "Our product delivers guaranteed results for every customer.",
+        "platform": "linkedin",
+        "brand": {
+          "name": "Northwind",
+          "prohibited_claims": ["guaranteed results"]
+        },
+        "source_ids": []
+      },
+      "allowed_source_ids": [],
+      "requirements": {
+        "expected_recommendation": "revise",
+        "expected_blocking_code": "prohibited_claim"
+      }
+    }
+  ]
+}
