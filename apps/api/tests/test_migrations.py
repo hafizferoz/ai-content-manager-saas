@@ -29,6 +29,7 @@ def test_clean_database_migrates_to_head(tmp_path, monkeypatch):
             "content_items", "content_versions", "quality_reviews", "approvals",
             "social_accounts", "social_account_capabilities", "publish_jobs", "mock_publications",
             "audit_logs", "campaign_strategies", "linkedin_credentials", "oauth_states",
+            "analytics_snapshots", "experiments", "community_messages", "community_replies",
         } <= tables
         approval_columns = {column["name"] for column in inspect(engine).get_columns("approvals")}
         assert "brand_fingerprint" in approval_columns
@@ -157,7 +158,9 @@ def test_social_capability_migration_backfills_existing_mock_accounts(tmp_path, 
         by_name = {row.capability: row for row in rows}
         assert by_name["publish"].status == "available"
         assert by_name["publish"].enabled is True
-        assert by_name["analytics"].status == "not_implemented"
-        assert by_name["analytics"].enabled is False
+        assert by_name["analytics"].status == "available"
+        assert by_name["analytics"].enabled is True
+        assert by_name["community"].status == "available"
+        assert by_name["community"].enabled is True
     finally:
         engine.dispose()

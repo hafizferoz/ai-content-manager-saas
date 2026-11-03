@@ -1,6 +1,6 @@
 # AI Content Manager SaaS
 
-A working Phase 1 foundation, Phase 2 AI workflows, and a Phase 3 capability-registry foundation for multi-tenant social content. The application includes an authenticated FastAPI API, a Next.js dashboard, PostgreSQL migrations, a database-backed publishing worker, an idempotent local mock social adapter, and structured research/strategy/drafting/review agents.
+A working Phase 1 foundation, Phase 2 AI workflows, Phase 3 LinkedIn publishing support, and a Phase 4 mock/manual analytics and community workflow slice. The application includes an authenticated FastAPI API, a Next.js dashboard, PostgreSQL migrations, a database-backed publishing worker, an idempotent local mock social adapter, and structured research/strategy/drafting/review agents.
 
 ## What works today
 
@@ -16,8 +16,10 @@ A working Phase 1 foundation, Phase 2 AI workflows, and a Phase 3 capability-reg
 - Persisted campaign strategy history with source and agent-run traceability.
 - Tenant-scoped social capability registry, mock adapter, and a limited LinkedIn OAuth/text-post adapter.
 - Tenant-scoped agent run history, token usage records, and approximate text-only platform previews.
+- Tenant-scoped analytics snapshots with metric definitions, freshness, filters, CSV export, and experiment logs; snapshots are mock/manual and are not live provider syncs.
+- A mock/manual community inbox with assignment, resolution, and human-reviewed reply drafts; no replies are sent externally.
 
-LinkedIn authorization and a limited text-only member-post adapter are implemented, but real calls require a correctly configured callback and encryption key, an approved LinkedIn app/product, and `w_member_social` permission. All other real social APIs, file uploads, calendar scheduling, analytics ingestion, and production identity-provider integration remain unavailable. Mock AI is the default; an optional server-configured OpenAI-compatible LLM provider is supported. The mock social adapter never sends an external post.
+LinkedIn authorization and a limited text-only member-post adapter are implemented, but real calls require a correctly configured callback and encryption key, an approved LinkedIn app/product, and `w_member_social` permission. All other real social APIs, provider-backed analytics/community ingestion, external community replies, file uploads, calendar scheduling, and production identity-provider integration remain unavailable. Mock AI is the default; an optional server-configured OpenAI-compatible LLM provider is supported. The mock social adapter never sends an external post.
 
 ## Run with Docker Compose
 

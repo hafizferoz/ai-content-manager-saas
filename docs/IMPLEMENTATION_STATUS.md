@@ -3,7 +3,9 @@
 **Current status:** Phase 1 and Phase 2 slices are implemented. Phase 3
 includes tested LinkedIn OAuth and a text-only member-post adapter;
 live LinkedIn app/account verification and other platforms remain
-outstanding.
+outstanding. Phase 4 now includes tenant-scoped analytics snapshots,
+experiment logging, and a mock/manual community inbox with reviewed
+reply drafts; provider analytics and community APIs are not enabled.
 
 ## Repository assessment
 
@@ -66,10 +68,14 @@ outstanding.
 
 ## Phase 4 --- Analytics/community
 
--   [ ] Analytics snapshots, definitions, freshness
--   [ ] Platform-aware reporting and experiments
--   [ ] Community inbox for supported API capabilities
--   [ ] Draft replies and review controls
+-   [x] Tenant-scoped mock/manual analytics snapshots with source, period, capture time, and explicit unavailable metrics
+-   [x] Metric definitions that identify units and non-comparable platform-specific rates/reach
+-   [x] Date, platform, account, campaign, and content filters plus CSV export
+-   [x] Experiment log with hypothesis, variant, period, primary metric, outcome, and next action
+-   [x] Tenant-scoped mock/manual community inbox with conversation IDs, assignment, filtering, and resolution
+-   [x] Reply draft, submit-for-review, and author-separated approval/change/rejection controls; no external send route
+-   [ ] Provider-backed analytics sync and platform-specific community API adapters after permission verification
+-   [ ] Saved replies and automated interaction classification
 
 ## Phase 5 --- Production readiness
 
@@ -91,7 +97,9 @@ outstanding.
 -   Authentication has no email verification, password reset, refresh-token rotation, or identity-provider integration.
 -   AI review and strategy outputs are advisory; they do not establish factual accuracy, legal compliance, content rights, or platform approval.
 -   Media manifest metadata is versioned, but uploads/private storage and media processing are not implemented.
--   Campaign editing/deletion, content library media upload, calendar scheduling, notifications, analytics, and operator reconciliation tools remain incomplete.
+-   Campaign editing/deletion, content library media upload, calendar scheduling, notifications, provider-backed analytics/community sync, saved replies, and automated interaction classification remain incomplete.
+-   Phase 4 analytics currently accepts explicitly labelled mock or manual imports; it does not fetch platform data. Reporting returns at most 500 matching snapshots and displays source metric values rather than inventing cross-platform aggregates. CSV export is available.
+-   Community interactions are mock or manually imported. Provider inbox synchronization, AI classification, saved replies, and all external reply sending are unavailable. Approved reply drafts never trigger a provider call.
 -   LinkedIn publish timeouts and server errors require manual verification. Owner/admin users can record a confirmed LinkedIn post URN or authorize a retry only after confirming no post exists; HTTP 429 responses are blocked until the operator waits for `Retry-After` and confirms no post was created. No blind automatic retries or provider-side post lookup are performed. LinkedIn read-post permissions may be restricted and are not requested.
 -   Operator reconciliation is currently LinkedIn-specific and is not a substitute for provider-backed verification. Mock publishing remains idempotent; LinkedIn does not receive an assumed idempotency guarantee from its Posts API.
 -   Production hosting, authentication provider, retention policy, and billing model remain undecided.

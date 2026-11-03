@@ -19,16 +19,18 @@ CAPABILITY_CATALOG = (
     {
         "name": "analytics",
         "description": "Read post and account analytics",
-        "mock_status": "not_implemented",
+        "mock_status": "available",
         "unavailable_status": "not_implemented",
-        "unavailable_reason": "Analytics ingestion is not implemented.",
+        "mock_reason": "Mock accounts support labelled mock or manually imported analytics snapshots; no provider sync is performed.",
+        "unavailable_reason": "Provider analytics sync is not implemented.",
     },
     {
         "name": "community",
         "description": "Read and respond to community interactions",
-        "mock_status": "not_implemented",
+        "mock_status": "available",
         "unavailable_status": "not_implemented",
-        "unavailable_reason": "Community API workflows are not implemented.",
+        "mock_reason": "Mock/manual inbox records and reviewed reply drafts are available; no external replies are sent.",
+        "unavailable_reason": "Provider community API workflows are not implemented.",
     },
     {
         "name": "oauth",
@@ -52,7 +54,7 @@ def capability_rows_for_account(
             status=entry["mock_status"] if is_mock else entry["unavailable_status"],
             enabled=is_mock and entry["mock_status"] == "available",
             reason=(
-                "Local mock adapter is available; no external post is sent."
+                entry.get("mock_reason", "Local mock adapter is available; no external post is sent.")
                 if is_mock and entry["mock_status"] == "available"
                 else entry["unavailable_reason"]
             ),
