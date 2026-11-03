@@ -24,7 +24,7 @@ from app.ai_schemas import (
 )
 from app.ai_workflows import WorkflowExecutionError, execute_workflow
 from app.models import (
-    AgentRun, Approval, AuditLog, BrandProfile, Campaign, ContentItem, ContentVersion,
+    AgentRun, Approval, AuditLog, BrandProfile, Campaign, CampaignStrategy, ContentItem, ContentVersion,
     Membership, Organization, PublishJob, QualityReview, ResearchRecord, ResearchSource,
     SessionToken, SocialAccount, UsageEvent, User,
 )
@@ -416,7 +416,25 @@ def update_brand(workspace_id: int, payload: BrandRequest, user: User = Depends(
 @app.get("/api/v1/workspaces/{workspace_id}/campaigns")
 def list_campaigns(workspace_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
     workspace_member(db, user, workspace_id)
-    return [as_dict(c) for c in db.scalars(select(Campaign).where(Campaign.organization_id == workspace_id).order_by(Campaign.id.desc()))]
+    campaigns = db.scalars(select(Campaign).where(
+        Campaign.organization_id == workspace_id
+    ).order_by(Campaign.id.desc())).all()
+    campaign_ids = [campaign.id for campaign in campaigns]
+    strategies = db.scalars(select(CampaignStrategy).where(
+        CampaignStrategy.organization_id == workspace_id,
+        CampaignStrategy.campaign_id.in_(campaign_ids or [-1]),
+    ).order_by(CampaignStrategy.created_at.desc(), CampaignStrategy.id.desc())).all()
+    latest_strategies = {}
+    for strategy in strategies:
+        latest_strategies.setdefault(strategy.campaign_id, strategy)
+    return [
+        {
+            **as_dict(campaign),
+            "latest_strategy": as_dict(latest_strategies[campaign.id])
+            if campaign.id in latest_strategies else None,
+        }
+        for campaign in campaigns
+    ]
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/campaigns", status_code=201)
@@ -901,8 +919,37 @@ def create_campaign_strategy(workspace_id: int, campaign_id: int, payload: Resea
     )
     audit(db, workspace_id, user.id, "campaign.strategy_generated", "campaign", campaign.id,
           {"run_id": run.id})
+    strategy_record = CampaignStrategy(
+        organization_id=workspace_id,
+        campaign_id=campaign.id,
+        agent_run_id=run.id,
+        created_by=user.id,
+        output=output.model_dump(mode="json"),
+        source_ids=source_ids,
+    )
+    db.add(strategy_record)
     db.commit()
-    return {"strategy": output.model_dump(mode="json"), "agent_run": as_dict(run)}
+    return {
+        "strategy": output.model_dump(mode="json"),
+        "strategy_record": as_dict(strategy_record),
+        "agent_run": as_dict(run),
+    }
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/campaigns/{campaign_id}/strategies")
+def list_campaign_strategies(workspace_id: int, campaign_id: int, user: User = Depends(current_user),
+                             db: Session = Depends(get_db)) -> list[dict]:
+    workspace_member(db, user, workspace_id)
+    campaign = db.scalar(select(Campaign).where(
+        Campaign.id == campaign_id,
+        Campaign.organization_id == workspace_id,
+    ))
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    return [as_dict(strategy) for strategy in db.scalars(select(CampaignStrategy).where(
+        CampaignStrategy.organization_id == workspace_id,
+        CampaignStrategy.campaign_id == campaign_id,
+    ).order_by(CampaignStrategy.created_at.desc(), CampaignStrategy.id.desc()).limit(50))]
 
 
 @app.post("/api/v1/workspaces/{workspace_id}/content/generate", status_code=201)

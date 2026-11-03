@@ -78,6 +78,19 @@ class Campaign(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class CampaignStrategy(Base):
+    __tablename__ = "campaign_strategies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    agent_run_id: Mapped[int] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), unique=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    output: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ResearchRecord(Base):
     __tablename__ = "research_records"
 

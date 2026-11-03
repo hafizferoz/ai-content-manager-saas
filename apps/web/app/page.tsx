@@ -358,6 +358,12 @@ function RecordList({ rows, kind, onAction, emptyText }: { rows: AnyRecord[]; ki
       <div className="record-main"><strong>{label}</strong><p>{contentSummary}</p>
         <small>ID {row.id ?? row.user_id}{row.platform ? ` · ${row.platform}` : ""}{row.role ? ` · ${row.role}` : ""}{row.provider ? ` · ${row.provider}/${row.model}` : ""}{row.duration_ms ? ` · ${row.duration_ms} ms` : ""}{row.status ? ` · ${row.status}` : ""}{row.account_name ? ` · ${row.account_name}` : ""}{row.destination ? ` · Destination: ${row.destination}` : ""}{row.version_number ? ` · Version ${row.version_number}` : ""}{version?.number ? ` · Version ${version.number}` : ""}{row.is_mock ? " · MOCK" : ""}</small>
         {kind === "research" && row.findings?.length > 0 && <p className="helper">{row.findings.map((finding: AnyRecord) => `${finding.classification}: ${finding.statement} [source IDs: ${finding.source_ids.join(", ") || "none"}]`).join(" · ")}</p>}
+        {kind === "campaign" && row.latest_strategy?.output && <div className="helper">
+          <strong>Latest strategy · {row.latest_strategy.output.audience}</strong>
+          <p>Message pillars: {row.latest_strategy.output.message_pillars.map((pillar: AnyRecord) => pillar.name).join(", ")}</p>
+          <p>CTA: {row.latest_strategy.output.call_to_action}</p>
+          <small>Strategy #{row.latest_strategy.id} · Run #{row.latest_strategy.agent_run_id} · Source IDs: {row.latest_strategy.source_ids.join(", ") || "none"}</small>
+        </div>}
         {version?.source_references?.length > 0 && <p className="helper">Source IDs: {version.source_references.join(", ")}</p>}
         {kind === "research" && row.sources?.length > 0 && <p className="helper">{row.sources.map((source: AnyRecord) => `Source ${source.id}: ${source.title} — ${source.url}`).join(" · ")}</p>}
         {kind === "approval" && row.source_references?.length > 0 && <p className="helper">{row.source_references.map((source: AnyRecord) => `Source ${source.id}: ${source.title} — ${source.url}`).join(" · ")}</p>}

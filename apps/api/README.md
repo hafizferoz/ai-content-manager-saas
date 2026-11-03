@@ -8,6 +8,7 @@ Local authentication uses Argon2 password hashes and opaque hashed bearer sessio
 
 - `POST /api/v1/workspaces/{id}/research` stores user-supplied source metadata/excerpts and generates source-linked findings. It never fetches a supplied URL.
 - `POST /api/v1/workspaces/{id}/campaigns/{campaign_id}/strategy` generates a structured campaign strategy.
+- Generated strategies are persisted as tenant-scoped campaign history with source IDs and agent-run references; campaign listing returns the latest strategy and `GET /api/v1/workspaces/{id}/campaigns/{campaign_id}/strategies` returns recent history.
 - `POST /api/v1/workspaces/{id}/content/generate` creates an editable content draft and immutable source-linked version.
 - `POST /api/v1/workspaces/{id}/campaigns/{campaign_id}/creative-concepts` generates structured creative proposals.
 - `POST /api/v1/workspaces/{id}/content/{item_id}/ai-review` stores an advisory review. Blocking findings prevent approval submission until a new passing review is recorded.

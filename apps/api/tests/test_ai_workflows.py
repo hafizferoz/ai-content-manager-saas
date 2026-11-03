@@ -47,6 +47,17 @@ def test_source_linked_research_strategy_and_creative_workflows(client):
     assert strategy.status_code == 200, strategy.text
     assert len(strategy.json()["strategy"]["message_pillars"]) >= 1
     assert research["sources"][0]["id"] in strategy.json()["strategy"]["source_ids"]
+    strategy_record = strategy.json()["strategy_record"]
+    assert strategy_record["campaign_id"] == campaign["id"]
+    assert strategy_record["source_ids"] == [research["sources"][0]["id"]]
+    assert strategy_record["output"] == strategy.json()["strategy"]
+    strategy_history = client.get(
+        f"/api/v1/workspaces/{workspace_id}/campaigns/{campaign['id']}/strategies"
+    )
+    assert strategy_history.status_code == 200
+    assert strategy_history.json()[0]["id"] == strategy_record["id"]
+    campaigns = client.get(f"/api/v1/workspaces/{workspace_id}/campaigns").json()
+    assert campaigns[0]["latest_strategy"]["id"] == strategy_record["id"]
 
     creative = client.post(
         f"/api/v1/workspaces/{workspace_id}/campaigns/{campaign['id']}/creative-concepts",
@@ -206,12 +217,25 @@ def test_ai_review_blocking_finding_prevents_approval(client, monkeypatch):
 
 def test_research_and_source_access_are_tenant_scoped(client):
     _, workspace_a = register_workspace(client, "research-a@example.com")
+    campaign = client.post(f"/api/v1/workspaces/{workspace_a}/campaigns", json={
+        "name": "Private strategy campaign",
+        "objective": "Keep campaign strategy private to its workspace",
+    }).json()
+    strategy = client.post(
+        f"/api/v1/workspaces/{workspace_a}/campaigns/{campaign['id']}/strategy",
+        json={"research_record_ids": []},
+    )
+    assert strategy.status_code == 200
     research = create_research(client, workspace_a).json()
     client.headers.pop("Authorization")
     _, workspace_b = register_workspace(client, "research-b@example.com")
 
     read = client.get(f"/api/v1/workspaces/{workspace_a}/research")
     assert read.status_code == 404
+    strategy_read = client.get(
+        f"/api/v1/workspaces/{workspace_b}/campaigns/{campaign['id']}/strategies"
+    )
+    assert strategy_read.status_code == 404
     generate = client.post(f"/api/v1/workspaces/{workspace_b}/content/generate", json={
         "platform": "linkedin",
         "brief": "Use a source outside this workspace.",

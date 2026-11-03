@@ -30,6 +30,7 @@ implemented and validated with automated tests and live Docker Compose runs.
 
 -   [x] Provider-neutral LLM adapter and validated structured outputs
 -   [x] Source-linked research using user-supplied source excerpts (no URL fetching)
+-   [x] Persisted campaign strategy history with source/run traceability
 -   [x] Market Intelligence agent
 -   [x] Content Strategist agent
 -   [x] Cross-Platform Copywriter agent
