@@ -1,12 +1,14 @@
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal
+from urllib.parse import urlencode
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field, field_validator
+from fastapi.responses import RedirectResponse
+from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field, field_validator, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -25,15 +27,30 @@ from app.ai_schemas import (
 from app.ai_workflows import WorkflowExecutionError, execute_workflow
 from app.models import (
     AgentRun, Approval, AuditLog, BrandProfile, Campaign, CampaignStrategy, ContentItem, ContentVersion,
-    Membership, Organization, PublishJob, QualityReview, ResearchRecord, ResearchSource,
-    SessionToken, SocialAccount, UsageEvent, User,
+    LinkedInCredential, Membership, OAuthState, Organization, PublishJob, QualityReview,
+    ResearchRecord, ResearchSource, SessionToken, SocialAccount, SocialAccountCapability,
+    UsageEvent, User,
 )
 from app.domain import fingerprint_brand
+from app.linkedin_oauth import (
+    LINKEDIN_SCOPES,
+    LinkedInConfigurationError,
+    LinkedInRequestError,
+    authorization_url,
+    configuration_status,
+    create_state,
+    encrypt_token,
+    exchange_code,
+    fetch_profile,
+    linkedin_publishing_enabled,
+    linkedin_settings,
+)
 from app.publishing import dispatch_job
 from app.security import bearer, create_session, current_user, password_hash, require_role, workspace_member
 from app.social_capabilities import (
     capability_catalog_response,
     capability_rows_for_account,
+    has_enabled_capability,
 )
 
 
@@ -147,6 +164,41 @@ class DecisionRequest(BaseModel):
 class ScheduleRequest(BaseModel):
     approval_id: int
     idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class PublishReconciliationRequest(BaseModel):
+    outcome: Literal["confirmed_published", "confirmed_not_published", "retry_after_rate_limit"]
+    evidence_summary: str = Field(min_length=20, max_length=500)
+    provider_post_id: str | None = Field(
+        default=None,
+        min_length=16,
+        max_length=160,
+        pattern=r"^urn:li:(share|ugcPost):[A-Za-z0-9_-]+$",
+    )
+    retry_confirmation: Literal[
+        "I confirmed no LinkedIn post was created",
+        "I waited for Retry-After and confirmed no LinkedIn post was created",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_reconciliation_evidence(self):
+        if self.outcome == "confirmed_published" and not self.provider_post_id:
+            raise ValueError("A confirmed LinkedIn post ID is required")
+        if self.outcome != "confirmed_published" and self.provider_post_id is not None:
+            raise ValueError("A provider post ID is valid only for a confirmed published outcome")
+        if self.outcome == "confirmed_not_published" and self.retry_confirmation is None:
+            raise ValueError("Explicit no-post confirmation is required before retry")
+        if self.outcome == "confirmed_not_published" and self.retry_confirmation != (
+            "I confirmed no LinkedIn post was created"
+        ):
+            raise ValueError("Explicit no-post confirmation is required before retry")
+        if self.outcome == "retry_after_rate_limit" and self.retry_confirmation != (
+            "I waited for Retry-After and confirmed no LinkedIn post was created"
+        ):
+            raise ValueError("Explicit rate-limit wait and no-post confirmation is required")
+        if self.outcome == "confirmed_published" and self.retry_confirmation is not None:
+            raise ValueError("Retry confirmation is not valid for a published outcome")
+        return self
 
 
 def as_dict(model: Any, omit: tuple[str, ...] = ()) -> dict:
@@ -479,6 +531,223 @@ def list_platform_capabilities(workspace_id: int, user: User = Depends(current_u
     return capability_catalog_response()
 
 
+@app.post("/api/v1/workspaces/{workspace_id}/integrations/linkedin/connect")
+def start_linkedin_connection(workspace_id: int, user: User = Depends(current_user),
+                              db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin")
+    try:
+        settings = linkedin_settings()
+    except LinkedInConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    raw_state, state_hash, expires_at = create_state()
+    now = datetime.now(timezone.utc)
+    db.execute(delete(OAuthState).where(
+        (OAuthState.expires_at <= now)
+        | (OAuthState.consumed_at.is_not(None) & (OAuthState.consumed_at <= now - timedelta(days=1)))
+    ))
+    db.add(OAuthState(
+        state_hash=state_hash,
+        provider="linkedin",
+        organization_id=workspace_id,
+        actor_id=user.id,
+        expires_at=expires_at,
+    ))
+    audit(db, workspace_id, user.id, "linkedin.oauth_started", "integration", "linkedin")
+    db.commit()
+    return {
+        "authorization_url": authorization_url(settings, raw_state),
+        "expires_in_seconds": 600,
+        "requested_scopes": list(LINKEDIN_SCOPES),
+    }
+
+
+@app.get("/api/v1/integrations/linkedin/callback")
+def linkedin_callback(
+    code: str | None = Query(default=None, max_length=4096),
+    state: str | None = Query(default=None, max_length=256),
+    error: str | None = Query(default=None, max_length=120),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    if not state:
+        raise HTTPException(status_code=400, detail="LinkedIn connection state is missing")
+    try:
+        settings = linkedin_settings()
+    except LinkedInConfigurationError as configuration_error:
+        raise HTTPException(status_code=503, detail=str(configuration_error)) from configuration_error
+    now = datetime.now(timezone.utc)
+    oauth_state = db.scalar(select(OAuthState).where(
+        OAuthState.provider == "linkedin",
+        OAuthState.state_hash == hashlib.sha256(state.encode()).hexdigest(),
+        OAuthState.consumed_at.is_(None),
+        OAuthState.expires_at > now,
+    ).with_for_update())
+    if oauth_state is None:
+        raise HTTPException(status_code=400, detail="LinkedIn connection state is invalid or expired")
+    oauth_state.consumed_at = now
+    membership = db.scalar(select(Membership).where(
+        Membership.organization_id == oauth_state.organization_id,
+        Membership.user_id == oauth_state.actor_id,
+        Membership.active.is_(True),
+        Membership.role.in_(("owner", "admin")),
+    ))
+    if membership is None:
+        audit(db, oauth_state.organization_id, oauth_state.actor_id,
+              "linkedin.oauth_rejected", "integration", "linkedin",
+              {"reason": "initiating_membership_inactive"})
+        db.commit()
+        return linkedin_result_redirect("connection_failed")
+    if error or not code:
+        audit(db, oauth_state.organization_id, oauth_state.actor_id,
+              "linkedin.oauth_cancelled", "integration", "linkedin")
+        db.commit()
+        return linkedin_result_redirect("cancelled")
+    db.commit()
+
+    try:
+        token = exchange_code(settings, code)
+        profile = fetch_profile(token.access_token)
+    except LinkedInRequestError as request_error:
+        audit(db, oauth_state.organization_id, oauth_state.actor_id,
+              "linkedin.oauth_failed", "integration", "linkedin",
+              {"reason": str(request_error)[:160]})
+        db.commit()
+        return linkedin_result_redirect("connection_failed")
+
+    external_account_id = f"urn:li:person:{profile['subject']}"
+    account = db.scalar(select(SocialAccount).where(
+        SocialAccount.organization_id == oauth_state.organization_id,
+        SocialAccount.platform == "linkedin",
+        SocialAccount.external_account_id == external_account_id,
+    ))
+    if account is None:
+        account = SocialAccount(
+            organization_id=oauth_state.organization_id,
+            platform="linkedin",
+            display_name=profile["name"],
+            external_account_id=external_account_id,
+            is_mock=False,
+            active=True,
+        )
+        db.add(account)
+        db.flush()
+    else:
+        account.display_name = profile["name"]
+        account.is_mock = False
+        account.active = True
+
+    credential = db.scalar(select(LinkedInCredential).where(
+        LinkedInCredential.organization_id == oauth_state.organization_id,
+        LinkedInCredential.social_account_id == account.id,
+    ))
+    if credential is None:
+        credential = LinkedInCredential(
+            organization_id=oauth_state.organization_id,
+            social_account_id=account.id,
+            connected_by=oauth_state.actor_id,
+            access_token_ciphertext=encrypt_token(token.access_token, settings.encryption_key),
+            refresh_token_ciphertext=(
+                encrypt_token(token.refresh_token, settings.encryption_key)
+                if token.refresh_token else ""
+            ),
+            granted_scopes=token.scopes,
+            access_token_expires_at=token.expires_at,
+            refresh_token_expires_at=token.refresh_expires_at,
+        )
+        db.add(credential)
+    else:
+        credential.connected_by = oauth_state.actor_id
+        credential.access_token_ciphertext = encrypt_token(token.access_token, settings.encryption_key)
+        if token.refresh_token:
+            credential.refresh_token_ciphertext = encrypt_token(token.refresh_token, settings.encryption_key)
+        credential.granted_scopes = token.scopes
+        credential.access_token_expires_at = token.expires_at
+        if token.refresh_expires_at:
+            credential.refresh_token_expires_at = token.refresh_expires_at
+
+    capabilities = db.scalars(select(SocialAccountCapability).where(
+        SocialAccountCapability.organization_id == oauth_state.organization_id,
+        SocialAccountCapability.social_account_id == account.id,
+    )).all()
+    by_name = {capability.capability: capability for capability in capabilities}
+    for capability in capability_rows_for_account(account):
+        if capability.capability not in by_name:
+            db.add(capability)
+            by_name[capability.capability] = capability
+    oauth_capability = by_name["oauth"]
+    oauth_capability.status = "connected"
+    oauth_capability.enabled = True
+    oauth_capability.reason = "LinkedIn OAuth connection is active."
+    oauth_capability.required_permissions = ["openid", "profile"]
+    publish_capability = by_name["publish"]
+    has_publish_permission = "w_member_social" in token.scopes
+    publishing_enabled = linkedin_publishing_enabled()
+    publish_capability.status = (
+        "available" if has_publish_permission and publishing_enabled
+        else "disabled_by_operator" if has_publish_permission
+        else "missing_permission"
+    )
+    publish_capability.enabled = has_publish_permission and publishing_enabled
+    publish_capability.reason = (
+        "Member publishing is enabled for approved text-only posts."
+        if has_publish_permission and publishing_enabled
+        else "Set PUBLISHING_ENABLED=true to enable LinkedIn publishing."
+        if has_publish_permission
+        else "Request the w_member_social permission in the LinkedIn Developer Portal."
+    )
+    publish_capability.required_permissions = ["w_member_social"]
+    for name in ("analytics", "community"):
+        capability = by_name[name]
+        capability.status = "not_implemented"
+        capability.enabled = False
+        capability.reason = "This LinkedIn API workflow is not implemented."
+
+    audit(db, oauth_state.organization_id, oauth_state.actor_id,
+          "linkedin.connected", "social_account", account.id,
+          {"scopes": token.scopes, "publish_enabled": publish_capability.enabled})
+    db.commit()
+    return linkedin_result_redirect("connected")
+
+
+@app.delete("/api/v1/workspaces/{workspace_id}/social-accounts/{account_id}/connection")
+def disconnect_social_account(workspace_id: int, account_id: int, user: User = Depends(current_user),
+                              db: Session = Depends(get_db)) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin")
+    account = db.scalar(select(SocialAccount).where(
+        SocialAccount.id == account_id,
+        SocialAccount.organization_id == workspace_id,
+    ))
+    if account is None:
+        raise HTTPException(status_code=404, detail="Social account not found")
+    if account.is_mock:
+        raise HTTPException(status_code=409, detail="Mock accounts do not have an OAuth connection")
+    if account.platform != "linkedin":
+        raise HTTPException(status_code=409, detail="Disconnect is not implemented for this provider")
+    credential = db.scalar(select(LinkedInCredential).where(
+        LinkedInCredential.organization_id == workspace_id,
+        LinkedInCredential.social_account_id == account.id,
+    ))
+    if credential is not None:
+        db.delete(credential)
+    account.active = False
+    for capability in account.capabilities:
+        capability.enabled = False
+        capability.status = "disconnected"
+        capability.reason = "LinkedIn connection was disconnected."
+    audit(db, workspace_id, user.id, "linkedin.disconnected", "social_account", account.id)
+    db.commit()
+    return {"status": "disconnected"}
+
+
+def linkedin_result_redirect(status: str) -> RedirectResponse:
+    web_base_url = os.getenv("WEB_BASE_URL", "http://localhost:3000").rstrip("/")
+    return RedirectResponse(
+        f"{web_base_url}/?{urlencode({'linkedin': status})}",
+        status_code=303,
+    )
+
+
 @app.post("/api/v1/workspaces/{workspace_id}/social-accounts", status_code=201)
 def create_account(workspace_id: int, payload: AccountRequest, user: User = Depends(current_user),
                    db: Session = Depends(get_db)) -> dict:
@@ -628,10 +897,20 @@ def submit_approval(workspace_id: int, item_id: int, payload: SubmissionRequest,
         SocialAccount.organization_id == workspace_id,
         SocialAccount.active.is_(True),
         SocialAccount.platform == item.platform,
-        SocialAccount.is_mock.is_(True),
     ))
     if account is None:
-        raise HTTPException(status_code=404, detail="Active mock account for this platform not found")
+        raise HTTPException(status_code=404, detail="Active connected account for this platform not found")
+    if not has_enabled_capability(db, account, "publish"):
+        raise HTTPException(status_code=409, detail="The selected account does not have publish permission")
+    if account.is_mock is not True:
+        if account.platform != "linkedin" or payload.destination != account.external_account_id:
+            raise HTTPException(status_code=409, detail="LinkedIn approval destination must be the connected member")
+        credential = db.scalar(select(LinkedInCredential).where(
+            LinkedInCredential.organization_id == workspace_id,
+            LinkedInCredential.social_account_id == account.id,
+        ))
+        if credential is None or "w_member_social" not in credential.granted_scopes:
+            raise HTTPException(status_code=409, detail="LinkedIn publishing requires the w_member_social permission")
     review = db.scalar(select(QualityReview).where(
         QualityReview.organization_id == workspace_id,
         QualityReview.content_version_id == version.id,
@@ -816,7 +1095,103 @@ def dispatch_publish(workspace_id: int, job_id: int, user: User = Depends(curren
         post_id = dispatch_job(job_id)
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error))
+    except Exception as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Publishing outcome is uncertain; reconcile before retrying",
+        ) from error
     return {"status": "published", "provider_post_id": post_id}
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/publish-jobs/{job_id}/reconcile")
+def reconcile_publish_job(
+    workspace_id: int,
+    job_id: int,
+    payload: PublishReconciliationRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    membership = workspace_member(db, user, workspace_id)
+    require_role(membership, "owner", "admin")
+    job = db.scalar(select(PublishJob).where(
+        PublishJob.id == job_id,
+        PublishJob.organization_id == workspace_id,
+    ).with_for_update())
+    if job is None:
+        raise HTTPException(status_code=404, detail="Publish job not found")
+    rate_limited = (
+        job.status == "blocked"
+        and job.error_message.startswith("LinkedIn rate limited this publish request (HTTP 429)")
+    )
+    if job.status != "reconciliation_required" and not rate_limited:
+        raise HTTPException(status_code=409, detail="Only uncertain or rate-limited LinkedIn jobs can be reconciled")
+    approval = db.scalar(select(Approval).where(
+        Approval.id == job.approval_id,
+        Approval.organization_id == workspace_id,
+    ))
+    if approval is None:
+        raise HTTPException(status_code=409, detail="Publish job approval is unavailable")
+    account = db.scalar(select(SocialAccount).where(
+        SocialAccount.id == approval.social_account_id,
+        SocialAccount.organization_id == workspace_id,
+    ))
+    if account is None:
+        raise HTTPException(status_code=409, detail="Publish job account or approval is unavailable")
+    if account.is_mock or account.platform != "linkedin":
+        raise HTTPException(status_code=409, detail="Manual reconciliation is available only for uncertain LinkedIn posts")
+    if approval.action != "publish" or approval.destination.strip() == "":
+        raise HTTPException(status_code=409, detail="A valid approved publish action is required")
+    if approval.destination != account.external_account_id:
+        raise HTTPException(status_code=409, detail="Publish job destination does not match the connected LinkedIn member")
+    if payload.outcome != "confirmed_published" and approval.status != "approved":
+        raise HTTPException(status_code=409, detail="A current human approval is required before retry")
+    if rate_limited and payload.outcome != "retry_after_rate_limit":
+        raise HTTPException(status_code=409, detail="A rate-limited request can only be retried after the provider wait period")
+    if not rate_limited and payload.outcome == "retry_after_rate_limit":
+        raise HTTPException(status_code=409, detail="This job was not classified as rate-limited")
+
+    previous_status = job.status
+    if payload.outcome == "confirmed_published":
+        job.status = "published"
+        job.provider_post_id = payload.provider_post_id
+        job.error_message = ""
+        job.completed_at = datetime.now(timezone.utc)
+        action = "publish.reconciled_published"
+        details = {
+            "provider": "linkedin",
+            "provider_post_id": payload.provider_post_id,
+            "evidence_summary": payload.evidence_summary,
+        }
+    else:
+        job.status = "queued"
+        job.provider_post_id = None
+        job.error_message = (
+            "Operator confirmed no LinkedIn post was created after the rate-limit wait; queued for a retry."
+            if payload.outcome == "retry_after_rate_limit"
+            else "Operator confirmed no LinkedIn post was created; queued for a retry."
+        )
+        job.completed_at = None
+        action = (
+            "publish.rate_limit_retry_authorized"
+            if payload.outcome == "retry_after_rate_limit"
+            else "publish.reconciled_retry_authorized"
+        )
+        details = {
+            "provider": "linkedin",
+            "evidence_summary": payload.evidence_summary,
+            "retry_confirmation": payload.retry_confirmation,
+        }
+    audit(
+        db,
+        workspace_id,
+        user.id,
+        action,
+        "publish_job",
+        job.id,
+        {"previous_status": previous_status, **details},
+    )
+    db.commit()
+    return as_dict(job)
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/audit-logs")

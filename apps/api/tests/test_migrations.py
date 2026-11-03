@@ -28,7 +28,7 @@ def test_clean_database_migrates_to_head(tmp_path, monkeypatch):
             "users", "session_tokens", "organizations", "memberships", "brand_profiles", "campaigns",
             "content_items", "content_versions", "quality_reviews", "approvals",
             "social_accounts", "social_account_capabilities", "publish_jobs", "mock_publications",
-            "audit_logs", "campaign_strategies",
+            "audit_logs", "campaign_strategies", "linkedin_credentials", "oauth_states",
         } <= tables
         approval_columns = {column["name"] for column in inspect(engine).get_columns("approvals")}
         assert "brand_fingerprint" in approval_columns
@@ -78,6 +78,7 @@ def test_ai_migration_upgrades_phase_one_schema(tmp_path):
     with engine.begin() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         for table_name in (
+            "oauth_states", "linkedin_credentials", "social_account_capabilities",
             "campaign_strategies", "usage_events", "agent_runs", "research_sources", "research_records"
         ):
             connection.exec_driver_sql(f"DROP TABLE {table_name}")
@@ -100,6 +101,7 @@ def test_ai_migration_upgrades_phase_one_schema(tmp_path):
     try:
         inspector = inspect(engine)
         assert {"research_records", "research_sources", "agent_runs", "usage_events"} <= set(inspector.get_table_names())
+        assert {"campaign_strategies", "social_account_capabilities", "linkedin_credentials", "oauth_states"} <= set(inspector.get_table_names())
         assert {"source_references"} <= {column["name"] for column in inspector.get_columns("content_versions")}
         assert {"status"} <= {column["name"] for column in inspector.get_columns("content_items")}
         assert {"review_type", "agent_run_id"} <= {column["name"] for column in inspector.get_columns("quality_reviews")}

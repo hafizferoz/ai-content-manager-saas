@@ -68,6 +68,18 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const connectionStatus = new URLSearchParams(window.location.search).get("linkedin");
+    if (connectionStatus) {
+      setNotice(
+        connectionStatus === "connected" ? "LinkedIn account connected. Review its granted capabilities."
+          : connectionStatus === "cancelled" ? "LinkedIn connection was cancelled."
+            : "LinkedIn connection failed. Check the app permissions and configuration, then try again.",
+      );
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
+  useEffect(() => {
     if (!token) return;
     request("/api/v1/auth/me").then((result) => {
       setUser(result.user);
@@ -306,10 +318,63 @@ export default function Home() {
         }} />}
         {tab === "Agent Activity" && <RecordList rows={data} kind="agent" emptyText="Completed and failed AI runs will appear here with provider, model, timing, outputs, and usage." />}
         {tab === "Usage" && <div className="metric-grid"><Metric label="AI runs with usage" value={usage?.event_count ?? 0} /><Metric label="Input tokens" value={usage?.input_tokens ?? 0} /><Metric label="Output tokens" value={usage?.output_tokens ?? 0} /><Metric label="Estimated token records" value={usage?.estimated_events ?? 0} />{usage && <div className="callout wide">{usage.cost_note}</div>}</div>}
-        {tab === "Accounts" && <><div className="callout"><strong>Mock integrations only.</strong> The capability registry is server-enforced. Mock publishing is available for local workflow testing; official OAuth, publishing, analytics, and community APIs are not connected.</div><form className="panel form-grid" onSubmit={(event) => submit(event, `${base}/social-accounts`)}><h2>Add local mock account</h2><label>Platform<select name="platform"><option value="linkedin">LinkedIn</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="youtube">YouTube</option><option value="x">X</option><option value="tiktok">TikTok</option></select></label><label>Account name<input name="display_name" required /></label><label>Destination ID<input name="external_account_id" required /></label><input type="hidden" name="is_mock" value="true" /><button className="primary">Add mock account</button></form><RecordList rows={data} kind="account" /></>}
-        {tab === "Publishing" && <RecordList rows={data} kind="job" onAction={async (row) => {
-          try { await request(`${base}/publish-jobs/${row.id}/dispatch`, { method: "POST" }); setNotice("Mock provider confirmed the post."); await loadWorkspace(); }
-          catch (error) { setNotice(error instanceof Error ? error.message : "Dispatch failed"); }
+        {tab === "Accounts" && <><div className="callout"><strong>LinkedIn integration:</strong> connect via official OAuth. Publishing is enabled only when LinkedIn grants w_member_social; only approved text-only member posts are supported. Other platforms remain mock-only.</div><div className="panel"><button className="primary" onClick={async () => {
+          try {
+            const result = await request(`${base}/integrations/linkedin/connect`, { method: "POST" });
+            window.location.assign(result.authorization_url);
+          } catch (error) { setNotice(error instanceof Error ? error.message : "Could not start LinkedIn connection"); }
+        }}>Connect LinkedIn</button></div><form className="panel form-grid" onSubmit={(event) => submit(event, `${base}/social-accounts`)}><h2>Add local mock account</h2><label>Platform<select name="platform"><option value="linkedin">LinkedIn</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="youtube">YouTube</option><option value="x">X</option><option value="tiktok">TikTok</option></select></label><label>Account name<input name="display_name" required /></label><label>Destination ID<input name="external_account_id" required /></label><input type="hidden" name="is_mock" value="true" /><button className="primary">Add mock account</button></form><RecordList rows={data} kind="account" onAction={async (row) => {
+          if (!window.confirm(`Disconnect ${row.display_name} from LinkedIn? Stored credentials will be deleted.`)) return;
+          try {
+            await request(`${base}/social-accounts/${row.id}/connection`, { method: "DELETE" });
+            setNotice("LinkedIn connection disconnected and stored credentials deleted.");
+            await loadWorkspace();
+          } catch (error) { setNotice(error instanceof Error ? error.message : "Disconnect failed"); }
+        }} /></>}
+        {tab === "Publishing" && <RecordList rows={data} kind="job" onAction={async (row, action) => {
+          try {
+            if (action === "reconcile") {
+              const rateLimited = row.status === "blocked";
+              const outcome = window.prompt(
+                rateLimited
+                  ? "After waiting for LinkedIn Retry-After, enter 'retry' only if you verified no post was created."
+                  : "Enter 'published' only if you verified the post exists, or 'not_published' only if you verified it does not.",
+              );
+              if (!outcome) return;
+              const evidence = window.prompt("Briefly describe how you verified the LinkedIn outcome (20–500 characters). Do not include credentials or tokens.");
+              if (!evidence) return;
+              let payload: AnyRecord = { evidence_summary: evidence };
+              if (rateLimited && outcome === "retry") {
+                payload.outcome = "retry_after_rate_limit";
+                payload.retry_confirmation = "I waited for Retry-After and confirmed no LinkedIn post was created";
+              } else if (!rateLimited && outcome === "published") {
+                const providerPostId = window.prompt("Enter the confirmed LinkedIn post URN (urn:li:share:... or urn:li:ugcPost:...).");
+                if (!providerPostId) return;
+                payload.outcome = "confirmed_published";
+                payload.provider_post_id = providerPostId;
+              } else if (!rateLimited && outcome === "not_published") {
+                if (!window.confirm("Confirm that you verified LinkedIn did not create this post. A retry may publish it.")) return;
+                payload.outcome = "confirmed_not_published";
+                payload.retry_confirmation = "I confirmed no LinkedIn post was created";
+              } else {
+                setNotice("Reconciliation choice was not valid for this job.");
+                return;
+              }
+              const result = await request(`${base}/publish-jobs/${row.id}/reconcile`, {
+                method: "POST",
+                body: JSON.stringify(payload),
+              });
+              setNotice(result.status === "queued"
+                ? "Retry authorized and queued after operator confirmation."
+                : result.status === "published"
+                  ? "LinkedIn post recorded as published."
+                  : `LinkedIn reconciliation saved with status ${result.status}.`);
+            } else {
+              await request(`${base}/publish-jobs/${row.id}/dispatch`, { method: "POST" });
+              setNotice(`${row.platform === "linkedin" ? "LinkedIn" : "Mock provider"} confirmed the post.`);
+            }
+            await loadWorkspace();
+          } catch (error) { setNotice(error instanceof Error ? error.message : "Publishing action failed"); }
         }} />}
         {tab === "Team" && <><form className="panel form-grid" onSubmit={(event) => submit(event, `${base}/members`)}><h2>Add registered workspace member</h2><label>Email<input name="email" type="email" required /></label><label>Role<select name="role"><option>approver</option><option>creator</option><option>strategist</option><option>admin</option><option>analyst</option><option>viewer</option></select></label><p className="helper wide">The person must register first. Authors cannot approve their own content.</p><button className="primary">Add member</button></form><RecordList rows={data} kind="member" /></>}
         {tab === "Audit" && <RecordList rows={data} kind="audit" />}
@@ -371,8 +436,10 @@ function RecordList({ rows, kind, onAction, emptyText }: { rows: AnyRecord[]; ki
         {kind === "approval" && row.quality_findings?.length > 0 && <p className="helper">{row.quality_findings.map((finding: AnyRecord) => `${finding.review_type}: ${finding.message}${finding.remediation ? ` (${finding.remediation})` : ""}`).join(" ")}</p>}
       </div>
       {kind === "content" && onAction && <div className="record-actions"><button className="secondary" onClick={() => onAction(row, "revise")}>New version</button><button className="secondary" onClick={() => onAction(row, "preview")}>Preview</button><button className="secondary" onClick={() => onAction(row, "quality")}>Quality check</button><button className="secondary" onClick={() => onAction(row, "ai-review")}>AI review</button><button className="primary" onClick={() => onAction(row, "submit")}>Request approval</button></div>}
+      {kind === "account" && !row.is_mock && onAction && <button className="danger" onClick={() => onAction(row, "disconnect")}>Disconnect LinkedIn</button>}
       {kind === "approval" && row.status === "pending" && onAction && <div className="record-actions"><button className="primary" onClick={() => onAction(row, "approved")}>Approve</button><button className="secondary" onClick={() => onAction(row, "changes_requested")}>Request changes</button><button className="danger" onClick={() => onAction(row, "rejected")}>Reject</button></div>}
-      {kind === "job" && row.status === "queued" && onAction && <button className="primary" onClick={() => onAction(row)}>Dispatch mock post</button>}
+      {kind === "job" && row.status === "queued" && onAction && <button className="primary" onClick={() => onAction(row, "dispatch")}>Dispatch post</button>}
+      {kind === "job" && (row.status === "reconciliation_required" || (row.status === "blocked" && String(row.error_message ?? "").startsWith("LinkedIn rate limited this publish request (HTTP 429)"))) && onAction && <button className="secondary" onClick={() => onAction(row, "reconcile")}>{row.status === "blocked" ? "Retry after rate limit" : "Reconcile LinkedIn outcome"}</button>}
       {row.status && <span className={`status ${row.status}`}>{row.status.replaceAll("_", " ")}</span>}
     </article>;
   })}</div>;

@@ -226,11 +226,16 @@ validation, publish, status lookup, analytics retrieval, and
 disconnect/revoke where supported.
 
 The initial implementation persists account-scoped capability status
-and dispatches through a mock adapter boundary only. It must report real
-provider capabilities as unavailable until each official integration,
-permission set, secure OAuth lifecycle, and reconciliation behavior has
-been implemented and verified. Workers re-check the enabled publish
-capability together with approval immediately before adapter dispatch.
+and dispatches through a mock adapter boundary. LinkedIn additionally
+supports authorization-code OAuth with hashed, expiring, single-use
+state, encrypted tokens, and text-only member posts through the official
+Posts API when `w_member_social` is granted. LinkedIn organization posts,
+media, analytics, and community features remain unavailable. Other real
+provider capabilities remain unavailable until each official
+integration, permission set, secure OAuth lifecycle, and reconciliation
+behavior has been implemented and verified. Workers re-check the
+enabled publish capability together with approval immediately before
+adapter dispatch.
 
 Adapters: - `LinkedInAdapter` - `InstagramAdapter` - `FacebookAdapter` -
 `YouTubeAdapter` - `XAdapter` - `TikTokAdapter` - `MockSocialAdapter`
@@ -249,7 +254,8 @@ Core tables/entities: - `users`, `organizations`,
 `campaigns`, `campaign_strategies` - `content_items`,
 `content_versions`, `media_assets` -
 `quality_reviews`, `approval_records` - `social_accounts`,
-`social_account_capabilities` - `publish_jobs`, `published_posts` -
+`social_account_capabilities`, encrypted provider credential records,
+`oauth_states` - `publish_jobs`, `published_posts` -
 `engagement_events`, `analytics_snapshots` - `agent_runs`,
 `usage_events`, optional `subscriptions` - `audit_logs`,
 `webhook_deliveries`, `outbox_events`

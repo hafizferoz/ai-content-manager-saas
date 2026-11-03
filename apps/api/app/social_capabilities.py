@@ -3,6 +3,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.linkedin_oauth import configuration_status
 from app.models import SocialAccount, SocialAccountCapability
 
 SUPPORTED_PLATFORMS = ("linkedin", "instagram", "facebook", "youtube", "x", "tiktok")
@@ -62,25 +63,52 @@ def capability_rows_for_account(
 
 
 def capability_catalog_response() -> list[dict[str, Any]]:
-    return [
-        {
+    linkedin_config = configuration_status()
+    result = []
+    for platform in SUPPORTED_PLATFORMS:
+        capabilities = []
+        for entry in CAPABILITY_CATALOG:
+            real_status = "not_implemented"
+            reason = entry["unavailable_reason"]
+            if platform == "linkedin" and linkedin_config["configured"]:
+                if entry["name"] == "oauth":
+                    real_status = "available"
+                    reason = "OAuth connection can be started; actual access depends on granted LinkedIn products and scopes."
+                elif entry["name"] == "publish":
+                    if linkedin_config["publishing_enabled"]:
+                        real_status = "requires_member_permission"
+                        reason = "Requires granted w_member_social scope and a valid member account."
+                    else:
+                        real_status = "disabled_by_operator"
+                        reason = "Set PUBLISHING_ENABLED=true before enabling LinkedIn publishing."
+            elif platform == "linkedin" and entry["name"] == "oauth":
+                reason = linkedin_config["reason"]
+            capabilities.append({
+                "name": entry["name"],
+                "description": entry["description"],
+                "mock_status": entry["mock_status"],
+                "real_status": real_status,
+                "reason": reason,
+                "required_permissions": (
+                    ["openid", "profile"] if entry["name"] == "oauth" and platform == "linkedin"
+                    else ["w_member_social"] if entry["name"] == "publish" and platform == "linkedin"
+                    else []
+                ),
+            })
+        result.append({
             "platform": platform,
-            "connection_mode": "mock_only",
-            "real_connection_status": "not_implemented",
-            "capabilities": [
-                {
-                    "name": entry["name"],
-                    "description": entry["description"],
-                    "mock_status": entry["mock_status"],
-                    "real_status": "not_implemented",
-                    "reason": entry["unavailable_reason"],
-                    "required_permissions": [],
-                }
-                for entry in CAPABILITY_CATALOG
-            ],
-        }
-        for platform in SUPPORTED_PLATFORMS
-    ]
+            "connection_mode": (
+                "oauth_available" if platform == "linkedin" and linkedin_config["configured"]
+                else "mock_only"
+            ),
+            "real_connection_status": (
+                "available" if platform == "linkedin" and linkedin_config["configured"]
+                else "not_configured" if platform == "linkedin"
+                else "not_implemented"
+            ),
+            "capabilities": capabilities,
+        })
+    return result
 
 
 def has_enabled_capability(db: Session, account: SocialAccount, capability: str) -> bool:

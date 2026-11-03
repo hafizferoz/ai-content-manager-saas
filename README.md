@@ -14,10 +14,10 @@ A working Phase 1 foundation, Phase 2 AI workflows, and a Phase 3 capability-reg
 - PostgreSQL/Redis/API/worker/web Docker Compose setup.
 - Source-linked research and structured Market Intelligence, Content Strategist, Cross-Platform Copywriter, Creative Director, and Quality/Brand Safety workflows.
 - Persisted campaign strategy history with source and agent-run traceability.
-- Tenant-scoped social capability registry and a mock-only adapter boundary; real provider connections remain disabled.
+- Tenant-scoped social capability registry, mock adapter, and a limited LinkedIn OAuth/text-post adapter.
 - Tenant-scoped agent run history, token usage records, and approximate text-only platform previews.
 
-Real social network APIs, file uploads, calendar scheduling, analytics ingestion, and production identity-provider integration are not enabled. Mock AI is the default; an optional server-configured OpenAI-compatible LLM provider is supported. The mock social adapter never sends an external post.
+LinkedIn authorization and a limited text-only member-post adapter are implemented, but real calls require a correctly configured callback and encryption key, an approved LinkedIn app/product, and `w_member_social` permission. All other real social APIs, file uploads, calendar scheduling, analytics ingestion, and production identity-provider integration remain unavailable. Mock AI is the default; an optional server-configured OpenAI-compatible LLM provider is supported. The mock social adapter never sends an external post.
 
 ## Run with Docker Compose
 
@@ -35,6 +35,8 @@ Sign up, create a mock social account and campaign, create a draft, run its qual
 To try Phase 2, add a research question and source excerpt under **Research**, then use the research record ID in **AI Studio** to generate strategy, creative concepts, or a platform-specific draft. AI-generated content is an editable draft. Review the structured source citations, run both quality checks as needed, and retain the human approval step before publishing.
 
 The default `LLM_PROVIDER=mock` does not send data externally. To opt into a configured OpenAI-compatible provider, set `LLM_PROVIDER=openai-compatible`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_BASE_URL` in the server `.env`, then restart the stack. Remote provider URLs must use HTTPS. Review the provider’s data-handling terms before sending customer content or source excerpts.
+
+For LinkedIn, configure its registered callback URI, `LINKEDIN_API_VERSION`, a generated `SOCIAL_TOKEN_ENCRYPTION_KEY`, and `PUBLISHING_ENABLED=true` only after verifying the approved app permissions. Follow [apps/api/README.md](apps/api/README.md); client credentials alone do not grant publishing access.
 
 ## Run services locally without Docker
 
@@ -94,7 +96,7 @@ The Phase 2 synthetic AI evaluation corpus can be run from `apps/api` with `pyth
 
 - Set strong local-only credentials in `.env`; do not commit it.
 - The starter is not yet a production deployment: add rate limiting, email verification/password recovery, managed secrets, retention/deletion controls, monitoring, backup/restore, and a security review before real customer data.
-- The app deliberately refuses non-mock accounts. Enable a real provider only after implementing its official API, permissions, secure OAuth/token storage, adapter contract tests, and operational reconciliation.
-- No publication is marked successful until the mock provider returns a confirmation.
+- Real publishing is currently limited to the optional LinkedIn text-only member-post adapter; other platforms remain mock-only. Real publishing requires an approved human action, the exact connected account/destination, granted member-post permission, and explicit operator enablement.
+- Uncertain LinkedIn outcomes are not retried automatically. Workspace owners/admins must manually verify the outcome before recording a confirmed post URN or authorizing a retry; rate-limited requests require waiting for `Retry-After` and confirming no post was created.
 
 See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for phase tracking and limitations, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for system boundaries, and [docs/DESIGN.md](docs/DESIGN.md) for interaction intent.

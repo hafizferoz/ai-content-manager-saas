@@ -19,12 +19,15 @@ def test_platform_capability_catalog_is_scoped_and_real_apis_are_disabled(client
         "linkedin", "instagram", "facebook", "youtube", "x", "tiktok",
     }
     for platform in registry:
+        expected_status = "not_configured" if platform["platform"] == "linkedin" else "not_implemented"
         assert platform["connection_mode"] == "mock_only"
-        assert platform["real_connection_status"] == "not_implemented"
+        assert platform["real_connection_status"] == expected_status
         publish = next(capability for capability in platform["capabilities"] if capability["name"] == "publish")
         assert publish["mock_status"] == "available"
         assert publish["real_status"] == "not_implemented"
-        assert publish["required_permissions"] == []
+        assert publish["required_permissions"] == (
+            ["w_member_social"] if platform["platform"] == "linkedin" else []
+        )
 
     client.headers.pop("Authorization")
     other_owner = register(client, "other-capability-owner@example.com", "Other workspace")
