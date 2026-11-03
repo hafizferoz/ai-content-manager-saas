@@ -13,6 +13,7 @@ from app.linkedin_oauth import (
     decrypt_token,
     encrypt_token,
     linkedin_settings,
+    normalize_linkedin_scopes,
     refresh_access_token,
 )
 from app.models import (
@@ -130,7 +131,11 @@ class LinkedInAdapter:
             db.commit()
             raise ValueError("LinkedIn authorization expired; reconnect the account before publishing")
         try:
-            refreshed = refresh_access_token(settings, refresh_token, credential.granted_scopes)
+            refreshed = refresh_access_token(
+                settings,
+                refresh_token,
+                normalize_linkedin_scopes(credential.granted_scopes),
+            )
         except LinkedInRequestError as error:
             self._disable_publish_capability(db, account, "LinkedIn token refresh failed; reconnect the account.")
             db.commit()
@@ -138,10 +143,10 @@ class LinkedInAdapter:
         credential.access_token_ciphertext = encrypt_token(refreshed.access_token, settings.encryption_key)
         if refreshed.refresh_token:
             credential.refresh_token_ciphertext = encrypt_token(refreshed.refresh_token, settings.encryption_key)
-        credential.granted_scopes = refreshed.scopes
+        credential.granted_scopes = normalize_linkedin_scopes(refreshed.scopes)
         credential.access_token_expires_at = refreshed.expires_at
         credential.refresh_token_expires_at = refreshed.refresh_expires_at or credential.refresh_token_expires_at
-        if "w_member_social" not in refreshed.scopes:
+        if "w_member_social" not in credential.granted_scopes:
             self._disable_publish_capability(db, account, "LinkedIn token no longer grants w_member_social.")
             db.commit()
             raise ValueError("LinkedIn publishing permission is missing; reconnect and grant the required permission")
@@ -160,7 +165,7 @@ class LinkedInAdapter:
         if approval.destination != account.external_account_id:
             raise ValueError("LinkedIn approval destination does not match the connected member")
         credential = self._credential(db, job.organization_id, account.id)
-        if "w_member_social" not in credential.granted_scopes:
+        if "w_member_social" not in normalize_linkedin_scopes(credential.granted_scopes):
             raise ValueError("LinkedIn publishing permission is missing; reconnect the account")
         try:
             settings = linkedin_settings()

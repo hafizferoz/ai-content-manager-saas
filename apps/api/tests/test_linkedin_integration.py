@@ -2,9 +2,11 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 from cryptography.fernet import Fernet
+import httpx
 from sqlalchemy import select
+import pytest
 
-from app.linkedin_oauth import LinkedInToken, decrypt_token, encrypt_token
+from app.linkedin_oauth import LinkedInToken, _parse_token_response, decrypt_token, encrypt_token
 from app.models import (
     Approval,
     ContentItem,
@@ -12,6 +14,7 @@ from app.models import (
     LinkedInCredential,
     PublishJob,
     SocialAccount,
+    SocialAccountCapability,
 )
 import app.publishing as publishing
 from conftest import register
@@ -176,6 +179,69 @@ def test_linkedin_oauth_state_is_single_use_and_tokens_are_encrypted(client, mon
     assert decrypt_token(encrypt_token(token.refresh_token, encryption_key), encryption_key) == token.refresh_token
 
 
+def test_linkedin_token_scope_response_normalizes_comma_separated_scopes():
+    response = httpx.Response(200, json={
+        "access_token": "synthetic-access-token",
+        "expires_in": 3600,
+        "scope": "openid,profile,w_member_social",
+    })
+
+    token = _parse_token_response(response, ["openid", "profile", "w_member_social"])
+
+    assert token.scopes == ["openid", "profile", "w_member_social"]
+
+
+def test_account_listing_repairs_legacy_comma_separated_linkedin_scopes(client, monkeypatch):
+    encryption_key, _ = configure_linkedin(monkeypatch)
+    owner = register(client)
+    workspace_id = owner["workspace"]["id"]
+    with publishing.SessionLocal() as db:
+        account = SocialAccount(
+            organization_id=workspace_id,
+            platform="linkedin",
+            display_name="LinkedIn Member",
+            external_account_id="urn:li:person:legacy-scope-test",
+            is_mock=False,
+            active=True,
+        )
+        db.add(account)
+        db.flush()
+        db.add(LinkedInCredential(
+            organization_id=workspace_id,
+            social_account_id=account.id,
+            connected_by=owner["user"]["id"],
+            access_token_ciphertext=encrypt_token("synthetic-access-token", encryption_key),
+            refresh_token_ciphertext="",
+            granted_scopes=["openid,profile,w_member_social"],
+            access_token_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ))
+        db.add(SocialAccountCapability(
+            organization_id=workspace_id,
+            social_account_id=account.id,
+            capability="publish",
+            status="missing_permission",
+            enabled=False,
+            reason="Request the w_member_social permission in the LinkedIn Developer Portal.",
+            required_permissions=["w_member_social"],
+        ))
+        db.commit()
+        account_id = account.id
+
+    response = client.get(f"/api/v1/workspaces/{workspace_id}/social-accounts")
+
+    assert response.status_code == 200
+    account_response = next(item for item in response.json() if item["id"] == account_id)
+    publish = next(item for item in account_response["capabilities"] if item["capability"] == "publish")
+    assert publish["enabled"] is True
+    assert publish["status"] == "available"
+    with publishing.SessionLocal() as db:
+        credential = db.scalar(select(LinkedInCredential).where(
+            LinkedInCredential.social_account_id == account_id,
+        ))
+        assert credential is not None
+        assert credential.granted_scopes == ["openid", "profile", "w_member_social"]
+
+
 def test_linkedin_publish_reconciliation_is_role_gated_and_audited(client):
     from app.models import AuditLog
 
@@ -285,6 +351,65 @@ def test_linkedin_publish_reconciliation_is_role_gated_and_audited(client):
         )).all()
         assert len(logs) == 3
         assert all(log.actor_id == owner["user"]["id"] for log in logs)
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected_status", "expected_action", "expected_reason"),
+    [
+        ("user_cancelled_login", "cancelled", "linkedin.oauth_cancelled", "user_cancelled_login"),
+        ("user_cancelled_authorize", "permission_denied", "linkedin.oauth_permission_declined", "user_cancelled_authorize"),
+        ("unsupported_scope", "connection_failed", "linkedin.oauth_failed", "provider_oauth_error"),
+    ],
+)
+def test_linkedin_oauth_callback_reports_only_safe_provider_error_category(
+    client,
+    monkeypatch,
+    provider_error,
+    expected_status,
+    expected_action,
+    expected_reason,
+):
+    from app.models import AuditLog
+
+    configure_linkedin(monkeypatch)
+    owner = register(client, f"oauth-error-{expected_status}@example.com", "OAuth Error Workspace")
+    workspace_id = owner["workspace"]["id"]
+    state = start_connection(client, workspace_id)
+    raw_description = "Provider description that must not be reflected or persisted"
+    response = client.get(
+        "/api/v1/integrations/linkedin/callback",
+        params={"error": provider_error, "error_description": raw_description, "state": state},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].endswith(f"/?linkedin={expected_status}")
+    assert raw_description not in response.headers["location"]
+
+    with publishing.SessionLocal() as db:
+        audit_entry = db.scalar(select(AuditLog).where(
+            AuditLog.organization_id == workspace_id,
+            AuditLog.action == expected_action,
+        ))
+        assert audit_entry is not None
+        assert audit_entry.details == {"reason": expected_reason}
+        assert raw_description not in str(audit_entry.details)
+        assert db.scalar(select(LinkedInCredential).where(
+            LinkedInCredential.organization_id == workspace_id,
+        )) is None
+
+
+def test_linkedin_oauth_callback_with_missing_code_is_failure_not_user_cancellation(client, monkeypatch):
+    configure_linkedin(monkeypatch)
+    owner = register(client, "oauth-missing-code@example.com", "OAuth Missing Code Workspace")
+    workspace_id = owner["workspace"]["id"]
+    state = start_connection(client, workspace_id)
+    response = client.get(
+        "/api/v1/integrations/linkedin/callback",
+        params={"state": state},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].endswith("/?linkedin=connection_failed")
 
 
 def test_linkedin_without_member_publish_scope_is_connected_but_cannot_publish(client, monkeypatch):

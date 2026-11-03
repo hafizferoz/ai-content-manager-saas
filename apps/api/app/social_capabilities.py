@@ -1,10 +1,15 @@
 from typing import Any
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.linkedin_oauth import configuration_status
-from app.models import SocialAccount, SocialAccountCapability
+from app.linkedin_oauth import (
+    configuration_status,
+    linkedin_publishing_enabled,
+    normalize_linkedin_scopes,
+)
+from app.models import LinkedInCredential, SocialAccount, SocialAccountCapability
 
 SUPPORTED_PLATFORMS = ("linkedin", "instagram", "facebook", "youtube", "x", "tiktok")
 
@@ -121,3 +126,64 @@ def has_enabled_capability(db: Session, account: SocialAccount, capability: str)
         SocialAccountCapability.enabled.is_(True),
         SocialAccountCapability.status == "available",
     ).limit(1)) is not None
+
+
+def reconcile_linkedin_publish_capability(db: Session, account: SocialAccount) -> bool:
+    if account.platform != "linkedin" or account.is_mock:
+        return False
+    credential = db.scalar(select(LinkedInCredential).where(
+        LinkedInCredential.organization_id == account.organization_id,
+        LinkedInCredential.social_account_id == account.id,
+    ))
+    if credential is None:
+        return False
+
+    scopes = normalize_linkedin_scopes(credential.granted_scopes)
+    has_permission = "w_member_social" in scopes
+    publishing_enabled = linkedin_publishing_enabled()
+    status = (
+        "available" if has_permission and publishing_enabled
+        else "disabled_by_operator" if has_permission
+        else "missing_permission"
+    )
+    reason = (
+        "Member publishing is enabled for approved text-only posts."
+        if has_permission and publishing_enabled
+        else "Set PUBLISHING_ENABLED=true to enable LinkedIn publishing."
+        if has_permission
+        else "Request the w_member_social permission in the LinkedIn Developer Portal."
+    )
+    capability = db.scalar(select(SocialAccountCapability).where(
+        SocialAccountCapability.organization_id == account.organization_id,
+        SocialAccountCapability.social_account_id == account.id,
+        SocialAccountCapability.capability == "publish",
+    ))
+    if capability is None:
+        capability = SocialAccountCapability(
+            organization_id=account.organization_id,
+            social_account_id=account.id,
+            capability="publish",
+            status=status,
+            enabled=has_permission and publishing_enabled,
+            reason=reason,
+            required_permissions=["w_member_social"],
+        )
+        account.capabilities.append(capability)
+        changed = True
+    else:
+        changed = (
+            credential.granted_scopes != scopes
+            or capability.status != status
+            or capability.enabled != (has_permission and publishing_enabled)
+            or capability.reason != reason
+            or capability.required_permissions != ["w_member_social"]
+        )
+        capability.status = status
+        capability.enabled = has_permission and publishing_enabled
+        capability.reason = reason
+        capability.required_permissions = ["w_member_social"]
+        if changed:
+            capability.checked_at = datetime.now(timezone.utc)
+    if credential.granted_scopes != scopes:
+        credential.granted_scopes = scopes
+    return changed

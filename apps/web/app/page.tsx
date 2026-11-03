@@ -24,6 +24,14 @@ export default function Home() {
   const [experiments, setExperiments] = useState<AnyRecord[]>([]);
   const [accounts, setAccounts] = useState<AnyRecord[]>([]);
   const [loading, setLoading] = useState(false);
+  const [approvalRequest, setApprovalRequest] = useState<{
+    content: AnyRecord;
+    accounts: AnyRecord[];
+    selectedAccountId: number | null;
+    confirmedMock: boolean;
+    submitting: boolean;
+    error: string;
+  } | null>(null);
 
   const request = useCallback(async (path: string, init: RequestInit = {}) => {
     const response = await fetch(`${API}${path}`, {
@@ -88,8 +96,10 @@ export default function Home() {
     if (connectionStatus) {
       setNotice(
         connectionStatus === "connected" ? "LinkedIn account connected. Review its granted capabilities."
-          : connectionStatus === "cancelled" ? "LinkedIn connection was cancelled."
-            : "LinkedIn connection failed. Check the app permissions and configuration, then try again.",
+          : connectionStatus === "cancelled" ? "LinkedIn sign-in was cancelled. Start the connection again if you want to connect."
+            : connectionStatus === "permission_denied"
+              ? "LinkedIn authorization was declined or a requested permission is unavailable. Check the app's approved Products/scopes in the LinkedIn Developer Portal, then try again."
+              : "LinkedIn did not complete authorization. Check that the exact callback URL is registered and the requested app permissions are approved, then retry. No account was connected.",
       );
       window.history.replaceState({}, "", window.location.pathname);
     }
@@ -158,6 +168,64 @@ export default function Home() {
     setNotice("");
   }
 
+  async function openApprovalRequest(content: AnyRecord) {
+    try {
+      const workspaceAccounts = await request(`${base}/social-accounts`);
+      const platformAccounts = workspaceAccounts.filter((account: AnyRecord) => account.platform === content.platform);
+      setApprovalRequest({
+        content,
+        accounts: platformAccounts,
+        selectedAccountId: null,
+        confirmedMock: false,
+        submitting: false,
+        error: "",
+      });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not load accounts for approval");
+    }
+  }
+
+  async function submitApprovalRequest() {
+    if (!approvalRequest) return;
+    const account = approvalRequest.accounts.find((item) => item.id === approvalRequest.selectedAccountId);
+    const publishCapability = account?.capabilities?.find((item: AnyRecord) => item.capability === "publish");
+    if (!account || !account.active || publishCapability?.enabled !== true || publishCapability.status !== "available") {
+      setApprovalRequest((current) => current ? { ...current, error: "Select an active account with publishing enabled." } : current);
+      return;
+    }
+    const hasLiveAccount = approvalRequest.accounts.some((item) =>
+      item.is_mock === false && item.active && item.capabilities?.some(
+        (capability: AnyRecord) => capability.capability === "publish" && capability.enabled === true && capability.status === "available",
+      ),
+    );
+    if (account.is_mock && hasLiveAccount && !approvalRequest.confirmedMock) {
+      setApprovalRequest((current) => current ? { ...current, error: "Confirm that you want to use this mock destination instead of the available live account." } : current);
+      return;
+    }
+    setApprovalRequest((current) => current ? { ...current, submitting: true, error: "" } : current);
+    try {
+      await request(`${base}/content/${approvalRequest.content.id}/submit-for-approval`, {
+        method: "POST",
+        body: JSON.stringify({
+          social_account_id: account.id,
+          destination: account.external_account_id,
+          action: "publish",
+        }),
+      });
+      setApprovalRequest(null);
+      setNotice(account.is_mock
+        ? `Submitted for approval to mock account "${account.display_name}". This will not publish externally.`
+        : `Submitted for approval to live LinkedIn account "${account.display_name}". A separate authorized approver must approve before the worker can publish.`);
+      await loadWorkspace();
+    } catch (error) {
+      setApprovalRequest((current) => current ? {
+        ...current,
+        submitting: false,
+        error: error instanceof Error ? error.message : "Could not submit for approval",
+      } : current);
+    }
+  }
+
   if (!token || !workspace) {
     return <main className="auth-page">
       <section className="auth-card">
@@ -195,6 +263,101 @@ export default function Home() {
       <div className="page-content">
         <div className="page-heading"><div><p className="eyebrow">CONTENT OPERATIONS</p><h1>{tab}</h1><p className="muted">Prepare, review, and publish content with a human approval gate.</p></div><button className="secondary" onClick={() => void refresh()}>Refresh</button></div>
         {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice("")}>Dismiss</button></div>}
+        {approvalRequest && <div
+          className="modal-backdrop"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !approvalRequest.submitting) setApprovalRequest(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !approvalRequest.submitting) setApprovalRequest(null);
+          }}
+        >
+          <section className="approval-dialog panel" role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title">
+            <div className="panel-heading">
+              <div><p className="eyebrow">CONTENT APPROVAL</p><h2 id="approval-dialog-title">Choose a destination</h2></div>
+              <button className="link-button" aria-label="Close dialog" autoFocus disabled={approvalRequest.submitting} onClick={() => setApprovalRequest(null)}>Close</button>
+            </div>
+            <p className="muted">Select the account for <strong>{approvalRequest.content.title}</strong> in <strong>{workspace.name}</strong>. Approval will be tied to this exact account and destination.</p>
+            <div className="approval-account-list">
+              {approvalRequest.accounts.map((account) => {
+                const capability = account.capabilities?.find((item: AnyRecord) => item.capability === "publish");
+                const ready = account.active && capability?.enabled === true && capability.status === "available";
+                const label = !account.active ? "INACTIVE" : account.is_mock ? "MOCK" : "LIVE";
+                const reason = !account.active
+                  ? "This account is inactive or disconnected."
+                  : ready
+                    ? account.is_mock ? "Mock destination; no external post will be sent." : "Publishing is enabled for this connected account."
+                    : capability?.reason || "Publishing is currently unavailable for this account.";
+                return <label key={account.id} className={`approval-account${ready ? "" : " unavailable"}${approvalRequest.selectedAccountId === account.id ? " selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="approval-destination"
+                    value={account.id}
+                    checked={approvalRequest.selectedAccountId === account.id}
+                    disabled={!ready || approvalRequest.submitting}
+                    onChange={() => setApprovalRequest((current) => current ? {
+                      ...current,
+                      selectedAccountId: account.id,
+                      confirmedMock: false,
+                      error: "",
+                    } : current)}
+                  />
+                  <span className="approval-account-details">
+                    <span className="approval-account-heading"><strong>{account.display_name}</strong><span className={`account-badge ${account.is_mock ? "mock" : "live"}`}>{label}{!ready && account.active ? " · UNAVAILABLE" : ""}</span></span>
+                    <code>{account.external_account_id}</code>
+                    <span className="helper">{reason}</span>
+                  </span>
+                </label>;
+              })}
+            </div>
+            {!approvalRequest.accounts.length && <div className="callout">
+              No {approvalRequest.content.platform} accounts are connected to this workspace. Connect an account from Accounts, then return to this content item.
+            </div>}
+            {approvalRequest.accounts.length > 0 && !approvalRequest.accounts.some((account) =>
+              account.is_mock === false && account.active && account.capabilities?.some(
+                (capability: AnyRecord) => capability.capability === "publish" && capability.enabled === true && capability.status === "available",
+              ),
+            ) && <div className="callout">
+              No live publishing account is available in <strong>{workspace.name}</strong>. If you connected LinkedIn in another workspace, switch to that workspace and use its content item; accounts are workspace-specific.
+            </div>}
+            {approvalRequest.selectedAccountId !== null && (() => {
+              const selected = approvalRequest.accounts.find((account) => account.id === approvalRequest.selectedAccountId);
+              const hasReadyLive = approvalRequest.accounts.some((account) =>
+                account.is_mock === false && account.active && account.capabilities?.some(
+                  (capability: AnyRecord) => capability.capability === "publish" && capability.enabled === true && capability.status === "available",
+                ),
+              );
+              if (!selected) return null;
+              if (selected.is_mock && hasReadyLive) return <label className="confirmation-check">
+                <input
+                  type="checkbox"
+                  checked={approvalRequest.confirmedMock}
+                  disabled={approvalRequest.submitting}
+                  onChange={(event) => setApprovalRequest((current) => current ? { ...current, confirmedMock: event.target.checked } : current)}
+                />
+                <span>I understand this will use a mock destination and will not publish externally.</span>
+              </label>;
+              if (!selected.is_mock) return <div className="callout live-warning">
+                If a separate authorized approver approves this request, the publishing worker may send the post to this live LinkedIn account.
+              </div>;
+              return null;
+            })()}
+            {approvalRequest.error && <p className="dialog-error" role="alert">{approvalRequest.error}</p>}
+            <div className="dialog-actions">
+              <button className="secondary" disabled={approvalRequest.submitting} onClick={() => setApprovalRequest(null)}>Cancel</button>
+              {approvalRequest.accounts.length === 0 && <button className="secondary" onClick={() => { setApprovalRequest(null); setTab("Accounts"); }}>Open Accounts</button>}
+              <button
+                className="primary"
+                disabled={approvalRequest.submitting || !approvalRequest.accounts.some((account) => account.id === approvalRequest.selectedAccountId && account.active && account.capabilities?.some((capability: AnyRecord) => capability.capability === "publish" && capability.enabled === true && capability.status === "available")) || (() => {
+                  const selected = approvalRequest.accounts.find((account) => account.id === approvalRequest.selectedAccountId);
+                  const hasReadyLive = approvalRequest.accounts.some((account) => account.is_mock === false && account.active && account.capabilities?.some((capability: AnyRecord) => capability.capability === "publish" && capability.enabled === true && capability.status === "available"));
+                  return Boolean(selected?.is_mock && hasReadyLive && !approvalRequest.confirmedMock);
+                })()}
+                onClick={() => void submitApprovalRequest()}
+              >{approvalRequest.submitting ? "Submitting…" : "Submit for approval"}</button>
+            </div>
+          </section>
+        </div>}
         {loading && <p className="helper">Loading…</p>}
         {tab === "Overview" && <Overview data={data} setTab={setTab} />}
         {tab === "Brand" && <form className="panel form-grid" onSubmit={(event) => submit(event, `${base}/brand`, "PUT", { ...brand, preferred_vocabulary: stringList(brand.preferred_vocabulary), prohibited_claims: stringList(brand.prohibited_claims) })}>
@@ -308,11 +471,8 @@ export default function Home() {
               const result = await request(`${base}/content/${row.id}/quality-check`, { method: "POST" });
               setNotice(result.passed ? "Quality checks passed with a review reminder." : `Review blocked: ${result.findings.filter((f: AnyRecord) => f.severity === "blocking").map((f: AnyRecord) => f.message).join(" ")}`);
             } else {
-              const accounts = await request(`${base}/social-accounts`);
-              const account = accounts.find((a: AnyRecord) => a.platform === row.platform && a.active);
-              if (!account) throw new Error("Create an active mock account for this platform first.");
-              await request(`${base}/content/${row.id}/submit-for-approval`, { method: "POST", body: JSON.stringify({ social_account_id: account.id, destination: account.external_account_id, action: "publish" }) });
-              setNotice("Submitted for human approval.");
+              await openApprovalRequest(row);
+              return;
             }
             await loadWorkspace();
           } catch (error) { setNotice(error instanceof Error ? error.message : "Action failed"); }
@@ -640,7 +800,7 @@ function RecordList({ rows, kind, onAction, emptyText }: { rows: AnyRecord[]; ki
     const contentSummary = row.body ?? row.content_body ?? version?.body ?? row.objective ?? row.email ?? row.action ?? row.destination ?? row.error_message ?? row.external_account_id ?? row.comment ?? row.resource_type ?? (row.output ? JSON.stringify(row.output) : "");
     return <article className="record panel" key={`${kind}-${row.id ?? row.user_id}`}>
       <div className="record-main"><strong>{label}</strong><p>{contentSummary}</p>
-        <small>ID {row.id ?? row.user_id}{row.platform ? ` · ${row.platform}` : ""}{row.role ? ` · ${row.role}` : ""}{row.provider ? ` · ${row.provider}/${row.model}` : ""}{row.duration_ms ? ` · ${row.duration_ms} ms` : ""}{row.status ? ` · ${row.status}` : ""}{row.account_name ? ` · ${row.account_name}` : ""}{row.destination ? ` · Destination: ${row.destination}` : ""}{row.version_number ? ` · Version ${row.version_number}` : ""}{version?.number ? ` · Version ${version.number}` : ""}{row.is_mock ? " · MOCK" : ""}</small>
+        <small>ID {row.id ?? row.user_id}{row.platform ? ` · ${row.platform}` : ""}{row.role ? ` · ${row.role}` : ""}{row.provider ? ` · ${row.provider}/${row.model}` : ""}{row.duration_ms ? ` · ${row.duration_ms} ms` : ""}{row.status ? ` · ${row.status}` : ""}{row.account_name ? ` · ${row.account_name}` : ""}{row.destination ? ` · Destination: ${row.destination}` : ""}{row.version_number ? ` · Version ${row.version_number}` : ""}{version?.number ? ` · Version ${version.number}` : ""}{row.is_mock === true || row.account_is_mock === true ? " · MOCK - no external post" : row.is_mock === false || row.account_is_mock === false ? " · LIVE ACCOUNT" : ""}</small>
         {kind === "research" && row.findings?.length > 0 && <p className="helper">{row.findings.map((finding: AnyRecord) => `${finding.classification}: ${finding.statement} [source IDs: ${finding.source_ids.join(", ") || "none"}]`).join(" · ")}</p>}
         {kind === "analytics" && <div className="helper"><p>Period: {row.period_start} → {row.period_end} · Captured: {row.fetched_at} · Source: {row.source} · {row.source_note}</p><p>{Object.entries(row.metrics ?? {}).map(([key, value]) => `${key}: ${value}`).join(" · ") || "No metric values supplied"}{row.unavailable_metrics?.length ? ` · Unavailable: ${row.unavailable_metrics.join(", ")}` : ""}</p>{row.campaign_name && <p>Campaign: {row.campaign_name}</p>}</div>}
         {kind === "experiment" && <div className="helper"><p>Hypothesis: {row.hypothesis}</p><p>Variant: {row.variant} · Primary metric: {row.primary_metric} · Period: {row.period_start} → {row.period_end}</p>{row.outcome && <p>Outcome: {row.outcome}</p>}{row.next_action && <p>Next action: {row.next_action}</p>}</div>}
@@ -659,7 +819,7 @@ function RecordList({ rows, kind, onAction, emptyText }: { rows: AnyRecord[]; ki
       </div>
       {kind === "content" && onAction && <div className="record-actions"><button className="secondary" onClick={() => onAction(row, "revise")}>New version</button><button className="secondary" onClick={() => onAction(row, "preview")}>Preview</button><button className="secondary" onClick={() => onAction(row, "quality")}>Quality check</button><button className="secondary" onClick={() => onAction(row, "ai-review")}>AI review</button><button className="primary" onClick={() => onAction(row, "submit")}>Request approval</button></div>}
       {kind === "account" && !row.is_mock && onAction && <button className="danger" onClick={() => onAction(row, "disconnect")}>Disconnect LinkedIn</button>}
-      {kind === "approval" && row.status === "pending" && onAction && <div className="record-actions"><button className="primary" onClick={() => onAction(row, "approved")}>Approve</button><button className="secondary" onClick={() => onAction(row, "changes_requested")}>Request changes</button><button className="danger" onClick={() => onAction(row, "rejected")}>Reject</button></div>}
+      {kind === "approval" && row.status === "pending" && onAction && <div className="record-actions"><button className="primary" onClick={() => onAction(row, "approved")}>{row.account_is_mock === true ? "Approve mock post" : row.account_is_mock === false ? "Approve LIVE LinkedIn post" : "Approve"}</button><button className="secondary" onClick={() => onAction(row, "changes_requested")}>Request changes</button><button className="danger" onClick={() => onAction(row, "rejected")}>Reject</button></div>}
       {kind === "job" && row.status === "queued" && onAction && <button className="primary" onClick={() => onAction(row, "dispatch")}>Dispatch post</button>}
       {kind === "job" && (row.status === "reconciliation_required" || (row.status === "blocked" && String(row.error_message ?? "").startsWith("LinkedIn rate limited this publish request (HTTP 429)"))) && onAction && <button className="secondary" onClick={() => onAction(row, "reconcile")}>{row.status === "blocked" ? "Retry after rate limit" : "Reconcile LinkedIn outcome"}</button>}
       {kind === "community" && onAction && <div className="record-actions">{row.status === "open" && <button className="primary" onClick={() => onAction(row, "reply")}>Draft reply</button>}<button className="secondary" onClick={() => onAction(row, "assign")}>Assign</button><button className="secondary" onClick={() => onAction(row, row.status === "open" ? "resolve" : "reopen")}>{row.status === "open" ? "Resolve" : "Reopen"}</button></div>}
