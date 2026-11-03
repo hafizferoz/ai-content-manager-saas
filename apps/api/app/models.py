@@ -134,6 +134,9 @@ class AgentRun(Base):
     input_refs: Mapped[dict] = mapped_column(JSON, default=dict)
     output: Mapped[dict] = mapped_column(JSON, default=dict)
     error_code: Mapped[str] = mapped_column(String(80), default="")
+    provider_attempts: Mapped[list] = mapped_column(JSON, default=list)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     content_version_id: Mapped[int | None] = mapped_column(ForeignKey("content_versions.id"), nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -146,13 +149,37 @@ class UsageEvent(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
     agent_run_id: Mapped[int] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), unique=True)
+    task_type: Mapped[str] = mapped_column(String(80), default="")
     provider: Mapped[str] = mapped_column(String(40))
     model: Mapped[str] = mapped_column(String(120))
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     is_estimated: Mapped[bool] = mapped_column(Boolean, default=False)
+    usage_available: Mapped[bool] = mapped_column(Boolean, default=True)
     cost_usd: Mapped[float | None] = mapped_column(nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="succeeded")
+    error_category: Mapped[str] = mapped_column(String(80), default="")
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AIProviderConfiguration(Base):
+    __tablename__ = "ai_provider_configurations"
+    __table_args__ = (UniqueConstraint("organization_id", "provider"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    api_key_ciphertext: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(200))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    base_url: Mapped[str] = mapped_column(String(500), default="")
+    configured_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class SocialAccount(Base):

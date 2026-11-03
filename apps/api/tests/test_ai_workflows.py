@@ -256,6 +256,10 @@ def test_provider_configuration_failure_is_recorded_and_reported(client, monkeyp
     runs = client.get(f"/api/v1/workspaces/{workspace_id}/agent-runs").json()
     assert runs[0]["status"] == "failed"
     assert runs[0]["error_code"] == "unsupported_provider"
+    usage = client.get(f"/api/v1/workspaces/{workspace_id}/usage").json()
+    assert usage["failed_requests"] == 1
+    assert usage["events"][0]["error_category"] == "unsupported_provider"
+    assert usage["events"][0]["usage_available"] is False
     research = client.get(f"/api/v1/workspaces/{workspace_id}/research").json()
     assert research[0]["status"] == "failed"
 
@@ -288,6 +292,123 @@ def test_copywriter_provider_rejection_reports_safe_actionable_error(client, mon
     runs = client.get(f"/api/v1/workspaces/{workspace_id}/agent-runs").json()
     assert runs[0]["status"] == "failed"
     assert runs[0]["error_code"] == "provider_authentication_failed"
+    usage = client.get(f"/api/v1/workspaces/{workspace_id}/usage").json()
+    assert usage["events"][0]["provider"] == "openai-compatible"
+    assert usage["events"][0]["status"] == "failed"
+    assert usage["events"][0]["usage_available"] is False
+
+
+def test_tenant_configured_provider_fallback_records_actual_provider_and_attempts(client, monkeypatch):
+    from cryptography.fernet import Fernet
+    import httpx
+
+    _, workspace_id = register_workspace(client)
+    monkeypatch.setenv("AI_ENCRYPTION_KEY", Fernet.generate_key().decode("ascii"))
+    monkeypatch.setenv("AI_MAX_PROVIDER_ATTEMPTS", "3")
+    for provider, model, priority in (
+        ("groq", "groq-model", 0),
+        ("mistral", "mistral-model", 1),
+    ):
+        configured = client.put(
+            f"/api/v1/workspaces/{workspace_id}/ai/providers/{provider}",
+            json={
+                "api_key": f"synthetic-{provider}-key",
+                "model": model,
+                "enabled": True,
+                "priority": priority,
+            },
+        )
+        assert configured.status_code == 200, configured.text
+
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(url)
+        if "groq.com" in url:
+            return httpx.Response(
+                429,
+                json={"error": {"code": "rate_limit_exceeded", "message": "private provider detail"}},
+                request=httpx.Request("POST", url),
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {
+                        "content": (
+                            '{"title":"A useful idea","hook":"Start here","body":"Helpful guidance",'
+                            '"call_to_action":"Share your view","hashtags":[],"source_ids":[],"assumptions":[]}'
+                        )
+                    }
+                }],
+                "usage": {"prompt_tokens": 15, "completion_tokens": 12},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.ai_provider.httpx.post", fake_post)
+    response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/content/generate",
+        json={"platform": "linkedin", "brief": "Share helpful guidance."},
+    )
+
+    assert response.status_code == 201, response.text
+    assert len(calls) == 2
+    run = response.json()["agent_run"]
+    assert run["provider"] == "mistral"
+    assert run["model"] == "mistral-model"
+    assert run["fallback_used"] is True
+    assert run["attempt_count"] == 2
+    assert [attempt["provider"] for attempt in run["provider_attempts"]] == ["groq", "mistral"]
+    assert run["provider_attempts"][0]["error_code"] == "provider_rate_limited"
+    usage = client.get(f"/api/v1/workspaces/{workspace_id}/usage").json()
+    assert usage["events"][0]["fallback_used"] is True
+    assert usage["events"][0]["attempt_count"] == 2
+
+
+def test_invalid_key_does_not_trigger_provider_fallback(client, monkeypatch):
+    from cryptography.fernet import Fernet
+    import httpx
+
+    _, workspace_id = register_workspace(client)
+    monkeypatch.setenv("AI_ENCRYPTION_KEY", Fernet.generate_key().decode("ascii"))
+    for provider, model, priority in (
+        ("groq", "groq-model", 0),
+        ("mistral", "mistral-model", 1),
+    ):
+        client.put(
+            f"/api/v1/workspaces/{workspace_id}/ai/providers/{provider}",
+            json={
+                "api_key": f"synthetic-{provider}-key",
+                "model": model,
+                "enabled": True,
+                "priority": priority,
+            },
+        )
+
+    calls = []
+
+    def rejected_request(url, headers, json, timeout):
+        calls.append(url)
+        return httpx.Response(
+            401,
+            text="private provider details",
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.ai_provider.httpx.post", rejected_request)
+    response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/content/generate",
+        json={"platform": "linkedin", "brief": "Share helpful guidance."},
+    )
+
+    assert response.status_code == 502
+    assert "provider_authentication_failed" in response.json()["detail"]
+    assert len(calls) == 1
+    run = client.get(f"/api/v1/workspaces/{workspace_id}/agent-runs").json()[0]
+    assert run["attempt_count"] == 1
+    assert run["fallback_used"] is False
+    assert run["provider_attempts"][0]["provider"] == "groq"
 
 
 def test_unscoped_model_source_reference_is_rejected(client, monkeypatch):

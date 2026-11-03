@@ -3,11 +3,13 @@ import pytest
 
 from app.ai_provider import (
     AIProviderError,
+    GeminiProvider,
     MockProvider,
     OpenAICompatibleProvider,
     _known_provider_error_code,
     _provider_rejection,
     create_provider,
+    create_named_provider,
 )
 
 
@@ -63,6 +65,52 @@ def test_openai_compatible_adapter_sends_json_mode_and_reads_usage(monkeypatch):
     assert result.input_tokens == 12
     assert result.output_tokens == 4
     assert result.usage_is_estimated is False
+
+
+def test_gemini_adapter_uses_json_generation_and_reads_usage(monkeypatch):
+    seen = {}
+
+    def fake_post(url, headers, json, timeout):
+        seen.update({"url": url, "headers": headers, "payload": json})
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [{"content": {"parts": [{"text": '{"result":"ok"}'}]}}],
+                "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.ai_provider.httpx.post", fake_post)
+    provider = GeminiProvider("test-only-key", "current-model")
+    result = provider.generate("agent", "Schema instructions", {"brief": "hello"})
+
+    assert seen["url"].endswith("/models/current-model:generateContent")
+    assert seen["headers"] == {"x-goog-api-key": "test-only-key"}
+    assert seen["payload"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert result.output == {"result": "ok"}
+    assert result.input_tokens == 11
+    assert result.output_tokens == 7
+    assert result.usage_is_estimated is False
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_base"),
+    [
+        ("groq", "https://api.groq.com/openai/v1"),
+        ("openrouter", "https://openrouter.ai/api/v1"),
+        ("mistral", "https://api.mistral.ai/v1"),
+        ("openai", "https://api.openai.com/v1"),
+    ],
+)
+def test_named_openai_compatible_providers_use_official_api_endpoints(name, expected_base):
+    provider = create_named_provider(name, "test-only-key", "account-model")
+
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.name == name
+    assert provider.base_url == expected_base
+    assert provider.model == "account-model"
+    assert provider.headers["Authorization"] == "Bearer test-only-key"
 
 
 def test_provider_errors_do_not_expose_provider_response_body(monkeypatch):

@@ -30,9 +30,17 @@ def test_clean_database_migrates_to_head(tmp_path, monkeypatch):
             "social_accounts", "social_account_capabilities", "publish_jobs", "mock_publications",
             "audit_logs", "campaign_strategies", "linkedin_credentials", "oauth_states",
             "analytics_snapshots", "experiments", "community_messages", "community_replies",
+            "ai_provider_configurations",
         } <= tables
         approval_columns = {column["name"] for column in inspect(engine).get_columns("approvals")}
         assert "brand_fingerprint" in approval_columns
+        assert {"provider_attempts", "fallback_used", "attempt_count"} <= {
+            column["name"] for column in inspect(engine).get_columns("agent_runs")
+        }
+        assert {
+            "task_type", "usage_available", "status", "error_category", "duration_ms",
+            "fallback_used", "attempt_count",
+        } <= {column["name"] for column in inspect(engine).get_columns("usage_events")}
     finally:
         engine.dispose()
 

@@ -119,18 +119,31 @@ media; quality reviews; approvals; social accounts and capabilities;
 publish jobs; published posts; analytics snapshots; agent runs; usage;
 subscriptions; audit logs; webhooks and outbox events.
 
-AI workflows use a provider-neutral structured-output boundary. The local
-provider is deterministic and credential-free; an optional server-side
-OpenAI-compatible adapter is configured explicitly. Validate all outputs
+AI workflows use a provider-neutral structured-output boundary. The
+credential-free deterministic mock remains the local default. Server-side
+adapters support Google Gemini's generate-content API and OpenAI-compatible
+chat completions for OpenAI, Groq, OpenRouter, Mistral, and compatible
+endpoints. Workspace owners/admins may configure organization-scoped
+credentials, encrypted at rest with a dedicated `AI_ENCRYPTION_KEY`;
+responses expose configuration status only, never key material. Environment
+configuration remains available as the platform default for backward
+compatibility.
+
+Configured providers are ordered per workspace. Automatic fallback is
+bounded by `AI_MAX_PROVIDER_ATTEMPTS` and applies only to transient
+rate-limit, quota, timeout, network, and provider-service failures. It does
+not continue after authentication, invalid-request, policy, or model
+configuration failures. Agent runs record each provider attempt and the
+provider/model that produced the validated output. Validate all outputs
 against typed schemas, scope citations to source records in the active
-organization, and record run status, provider/model, duration, and usage
-without storing credentials or hidden reasoning. User-provided source
-excerpts are untrusted data; do not fetch arbitrary source URLs as part
-of this workflow. A versioned synthetic evaluation corpus exercises all
-Phase 2 output schemas, citation scoping, and selected brand-safety
-expectations. Mock evaluation is the safe default; live provider
-evaluation requires explicit operator opt-in and must not use customer
-data. Evaluation does not approve or publish content.
+organization, and record usage without storing credentials or hidden
+reasoning. User-provided source excerpts are untrusted data; do not fetch
+arbitrary source URLs as part of this workflow. A versioned synthetic
+evaluation corpus exercises all Phase 2 output schemas, citation scoping,
+and selected brand-safety expectations. Mock evaluation is the safe
+default; live provider evaluation requires explicit operator opt-in and
+must not use customer data. Evaluation does not approve or publish
+content.
 
 ### Workers
 

@@ -49,6 +49,12 @@ information, and errors.
 -   [x] AI workflow tests for output validation, source scoping, errors, and usage
 -   [x] Mock/provider adapter contract tests (HTTP mocked; no external credentials used)
 -   [x] Safe, status-specific provider failure guidance in workflow responses, including quota-versus-rate-limit classification; error codes persisted in agent-run history
+-   [x] Gemini, Groq, OpenRouter, Mistral, and OpenAI provider adapters with model discovery and credential-validation endpoints
+-   [x] Workspace-scoped provider configuration with separately encrypted API keys, owner/admin authorization, and secret-free API responses
+-   [x] Bounded tenant-configured fallback for transient provider failures with attempt/provider traceability
+-   [x] AI Providers settings page for key configuration, connection checks, model discovery, enablement, and fallback order
+-   [x] Tenant-scoped request-level usage records, including failed workflow requests and fallback/provider aggregates
+-   [ ] Task-specific provider/model preferences, usage cost/pricing registry, budgets/limits, threshold warnings, and full usage analytics dashboard
 -   [x] Versioned five-workflow evaluation corpus and safe-by-default regression runner
 -   [ ] Run and review live-provider quality baselines for each supported deployment model
 
@@ -100,7 +106,7 @@ information, and errors.
 
 -   LinkedIn authorization and a text-only member-post adapter are implemented but require app-specific credentials, a registered callback URL, token-encryption key, and approved `w_member_social` permission before the real path can be exercised. Other social publishing remains mock-only.
 -   `USE_MOCK_SOCIAL_ADAPTER` is not a global adapter switch. The selected account determines mock versus live behavior; the approval UI requires the destination choice and warns when approving a live LinkedIn post.
--   AI uses a deterministic mock by default. A versioned synthetic corpus checks structured outputs, source scoping, and selected brand-safety expectations; provider-specific live quality baselines, budgets, and deployment secrets management are not production-ready.
+-   AI uses a deterministic mock by default. Gemini, Groq, OpenRouter, Mistral, and OpenAI adapters plus encrypted workspace BYOK settings and transient-error fallback are available. Configure `AI_ENCRYPTION_KEY` before saving workspace keys. Task-specific model preferences, provider pricing/cost estimates, usage budgets/limits, chart/filter analytics, and live quality baselines are not implemented; provider costs are reported as unknown.
 -   Research stores user-supplied source URLs and excerpts; URL fetching/crawling and independent source verification are intentionally not implemented.
 -   Mock token counts are estimates and provider costs may be unknown; usage reporting currently retains up to 1,000 most recent events per workspace.
 -   Platform previews are text-only approximations and do not guarantee platform capability or exact rendering.

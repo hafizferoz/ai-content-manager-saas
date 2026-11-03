@@ -71,6 +71,19 @@ input:focus, textarea:focus, select:focus, button:focus-visible { outline: 3px s
 .callout, .notice { background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; color: #3730a3; margin-top: 15px; padding: 12px 15px; }
 .ai-studio { display: grid; gap: 14px; }
 .ai-studio .callout { margin-top: 0; }
+.ai-provider-settings { display: grid; gap: 14px; }
+.ai-provider-settings > .callout { margin-top: 0; }
+.provider-grid { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.provider-card { align-content: start; display: grid; gap: 14px; }
+.provider-card .panel-heading { align-items: flex-start; gap: 10px; }
+.provider-card .panel-heading h2 { margin: 0; }
+.provider-key-field { display: flex; gap: 8px; }
+.provider-key-field button { flex: 0 0 auto; }
+.provider-controls { align-items: end; display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+.provider-enabled { align-items: center; display: flex; gap: 9px; min-height: 40px; }
+.provider-enabled input { accent-color: var(--primary); min-height: 18px; width: 18px; }
+.provider-status { min-height: 18px; overflow-wrap: anywhere; }
+.provider-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .output-json { max-height: 480px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .preview-panel { margin-top: 16px; }
 .preview-panel p { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -127,7 +140,7 @@ input:focus, textarea:focus, select:focus, button:focus-visible { outline: 3px s
 .auth-card h1 span { color: var(--primary); }
 .auth-form { display: grid; gap: 15px; margin-top: 24px; }
 .auth-form .link-button { justify-self: center; }
-@media (max-width: 900px) { .sidebar { width: 210px; } .metric-grid { grid-template-columns: repeat(2, 1fr); } .page-content { padding: 25px; } }
-@media (max-width: 640px) { .app-shell { display: block; } .sidebar { padding: 12px; width: 100%; } .sidebar nav { display: flex; overflow: auto; } .nav-item { flex: 0 0 auto; } .workspace-label, .workspace-name, .sidebar-foot { display: none; } .logo { margin-bottom: 10px; } .topbar { height: 54px; padding: 0 16px; } .page-content { padding: 20px 14px; } .page-heading { align-items: flex-start; gap: 10px; } h1 { font-size: 25px; } .form-grid { grid-template-columns: 1fr; } .form-grid h2, .wide { grid-column: auto; } .metric-grid { gap: 8px; } .record { align-items: flex-start; flex-direction: column; } .record-actions { width: 100%; } .modal-backdrop { padding: 10px; } .message-dialog, .approval-dialog { max-height: calc(100vh - 20px); padding: 16px; } .dialog-actions > button { flex: 1 1 auto; } .toast { grid-template-columns: 22px minmax(0, 1fr); right: 12px; top: 64px; } .toast button { grid-column: 2; justify-self: start; padding: 0; } }
+@media (max-width: 900px) { .sidebar { width: 210px; } .metric-grid { grid-template-columns: repeat(2, 1fr); } .provider-grid { grid-template-columns: 1fr; } .page-content { padding: 25px; } }
+@media (max-width: 640px) { .app-shell { display: block; } .sidebar { padding: 12px; width: 100%; } .sidebar nav { display: flex; overflow: auto; } .nav-item { flex: 0 0 auto; } .workspace-label, .workspace-name, .sidebar-foot { display: none; } .logo { margin-bottom: 10px; } .topbar { height: 54px; padding: 0 16px; } .page-content { padding: 20px 14px; } .page-heading { align-items: flex-start; gap: 10px; } h1 { font-size: 25px; } .form-grid { grid-template-columns: 1fr; } .form-grid h2, .wide { grid-column: auto; } .provider-controls { grid-template-columns: 1fr; } .provider-actions > button { flex: 1 1 auto; } .metric-grid { gap: 8px; } .record { align-items: flex-start; flex-direction: column; } .record-actions { width: 100%; } .modal-backdrop { padding: 10px; } .message-dialog, .approval-dialog { max-height: calc(100vh - 20px); padding: 16px; } .dialog-actions > button { flex: 1 1 auto; } .toast { grid-template-columns: 22px minmax(0, 1fr); right: 12px; top: 64px; } .toast button { grid-column: 2; justify-self: start; padding: 0; } }
 @media (prefers-reduced-motion: no-preference) { .toast { animation: toast-enter 160ms ease-out; } }
 @keyframes toast-enter { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
